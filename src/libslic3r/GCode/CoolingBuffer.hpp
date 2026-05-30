@@ -177,6 +177,20 @@ Vec2f compute_cooling_tower_xy(
     float diameter,
     float margin);
 
+// Final XY resolution for a cooling-tower spawn, applied once per print by
+// GCode::process_layer. Priority (highest first):
+//   1. `user_pinned` non-empty: returns the first user-supplied point
+//      verbatim (no bed clamping — trust the user).
+//   2. `model_bbox.defined`: delegates to compute_cooling_tower_xy so the
+//      spiral lands adjacent to the model union bbox.
+//   3. Empty model bbox (no objects yet, or caller didn't compute one):
+//      bed's right-front corner (legacy fallback).
+Vec2f resolve_cooling_tower_xy(
+    const BoundingBoxf       &bed_bbox,
+    const BoundingBoxf       &model_bbox,
+    float                     diameter,
+    const std::vector<Vec2d> &user_pinned);
+
 // A standalone G-code filter, to control cooling of the print.
 // The G-code is processed per layer. Once a layer is collected, fan start / stop commands are edited
 // and the print is modified to stretch over a minimum layer time.

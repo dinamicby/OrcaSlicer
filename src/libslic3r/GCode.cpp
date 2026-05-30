@@ -4615,23 +4615,33 @@ LayerResult GCode::process_layer(
                 gcode += hint_buf;
 
             } else if (strat == static_cast<int>(mltsCoolingTower)) {
-                // Cooling-tower XY is constant for the whole print. Either
-                // user-pinned via cooling_tower_position, or auto-placed at
-                // the bed's right-front corner (offset by tower radius + margin).
-                // TODO(cooling-tower V2): replace the corner fallback with a
-                // model-bbox-aware placement once we plumb the whole-print bbox
-                // through Print:: into here (compute_cooling_tower_xy already
-                // exists and is unit-tested for this).
-                Vec2f tower_xy;
-                if (! m_config.cooling_tower_position.values.empty()) {
-                    const Vec2d &p = m_config.cooling_tower_position.values.front();
-                    tower_xy = Vec2f(float(p.x()), float(p.y()));
-                } else {
-                    const float half = float(m_config.cooling_tower_diameter.value) * 0.5f + 3.f;
-                    tower_xy = Vec2f(
-                        float(bed_bbox.max.x()) - half,
-                        float(bed_bbox.min.y()) + half);
+                // Cooling-tower XY is constant for the whole print. Priority:
+                //   1. user-pinned via cooling_tower_position
+                //   2. auto-placed adjacent to the model union bbox
+                //   3. bed's right-front corner (only when there are no
+                //      objects yet — vacuous case in normal slicing)
+                // The placement logic itself lives in resolve_cooling_tower_xy
+                // (in CoolingBuffer.cpp, unit-tested without slice).
+                // Print::bounding_box() exists in Print.cpp but is wrapped in
+                // `#if 0`, so we aggregate the same way inline: union of each
+                // object's local bbox shifted by each instance's position.
+                BoundingBox model_bb_scaled;
+                for (const PrintObject *object : print.objects()) {
+                    BoundingBox obj_bb = object->bounding_box();
+                    for (const PrintInstance &instance : object->instances()) {
+                        model_bb_scaled.merge(obj_bb.min + instance.shift);
+                        model_bb_scaled.merge(obj_bb.max + instance.shift);
+                    }
                 }
+                BoundingBoxf model_bb;
+                if (model_bb_scaled.defined) {
+                    model_bb.merge(unscale(model_bb_scaled.min));
+                    model_bb.merge(unscale(model_bb_scaled.max));
+                }
+                const Vec2f tower_xy = resolve_cooling_tower_xy(
+                    bed_bbox, model_bb,
+                    float(m_config.cooling_tower_diameter.value),
+                    m_config.cooling_tower_position.values);
 
                 char hint_buf[96];
                 snprintf(hint_buf, sizeof(hint_buf),

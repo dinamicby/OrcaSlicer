@@ -242,6 +242,47 @@ TEST_CASE("compute_cooling_tower_xy falls back to a bed corner when no edge has 
     CHECK(xy.y() <= 389.5f);
 }
 
+TEST_CASE("resolve_cooling_tower_xy returns the user-pinned point verbatim",
+          "[cooling_tower][cooling]") {
+    BoundingBoxf bed(Vec2d(0, 0), Vec2d(300, 300));
+    BoundingBoxf model(Vec2d(50, 50), Vec2d(120, 120));
+    std::vector<Vec2d> pinned = { Vec2d(42.5, 17.0) };
+
+    Vec2f xy = Slic3r::resolve_cooling_tower_xy(bed, model, /*diameter=*/15.f, pinned);
+    CHECK(xy.x() == Approx(42.5f).margin(0.001f));
+    CHECK(xy.y() == Approx(17.0f).margin(0.001f));
+}
+
+TEST_CASE("resolve_cooling_tower_xy auto-places adjacent to the model when no pin",
+          "[cooling_tower][cooling]") {
+    // Small object in the lower-left of a CD400-sized bed — exactly the
+    // scenario that produced the visible bug (tower landed in the bed corner
+    // instead of next to the benchy).
+    BoundingBoxf bed(Vec2d(0, 0), Vec2d(300, 300));
+    BoundingBoxf model(Vec2d(60, 60), Vec2d(120, 120));
+
+    Vec2f xy = Slic3r::resolve_cooling_tower_xy(bed, model, /*diameter=*/15.f, /*pinned=*/{});
+
+    // Right of model: x = 120 + half (10.5) = 130.5, y = model center (90).
+    CHECK(xy.x() == Approx(130.5f).margin(0.01f));
+    CHECK(xy.y() == Approx(90.f).margin(0.01f));
+}
+
+TEST_CASE("resolve_cooling_tower_xy uses the legacy bed-corner fallback when model bbox is empty",
+          "[cooling_tower][cooling]") {
+    // Default-constructed BoundingBoxf is `defined=false`; the resolver must
+    // not feed it into compute_cooling_tower_xy (would produce garbage).
+    BoundingBoxf bed(Vec2d(0, 0), Vec2d(300, 300));
+    BoundingBoxf empty_model;   // .defined == false
+
+    Vec2f xy = Slic3r::resolve_cooling_tower_xy(bed, empty_model, /*diameter=*/15.f, /*pinned=*/{});
+
+    // Bed's right-front corner with the same offset the old hardcode used
+    // (half = 10.5): (bed.max.x - 10.5, bed.min.y + 10.5) = (289.5, 10.5).
+    CHECK(xy.x() == Approx(289.5f).margin(0.01f));
+    CHECK(xy.y() == Approx(10.5f).margin(0.01f));
+}
+
 // === Cooling-tower strategy: enum value + config field defaults ===
 //
 // `cooling_tower` is the third option for `min_layer_time_strategy`. When the

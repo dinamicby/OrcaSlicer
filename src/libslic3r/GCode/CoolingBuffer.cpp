@@ -393,6 +393,29 @@ Vec2f compute_cooling_tower_xy(
         std::min(std::max(cy, float(bed.min.y()) + half), float(bed.max.y()) - half));
 }
 
+Vec2f resolve_cooling_tower_xy(
+    const BoundingBoxf       &bed_bbox,
+    const BoundingBoxf       &model_bbox,
+    float                     diameter,
+    const std::vector<Vec2d> &user_pinned)
+{
+    if (! user_pinned.empty()) {
+        const Vec2d &p = user_pinned.front();
+        return Vec2f(float(p.x()), float(p.y()));
+    }
+    constexpr float kMargin = 3.f;
+    if (model_bbox.defined) {
+        return compute_cooling_tower_xy(model_bbox, bed_bbox, diameter, kMargin);
+    }
+    // Legacy fallback: bed's right-front corner with the same half-offset the
+    // pre-V2 inline code used. Reached only when the caller couldn't supply a
+    // model bbox (e.g. empty plate) and the user didn't pin one.
+    const float half = diameter * 0.5f + kMargin;
+    return Vec2f(
+        float(bed_bbox.max.x()) - half,
+        float(bed_bbox.min.y()) + half);
+}
+
 CoolingBuffer::CoolingBuffer(GCode &gcodegen) : m_config(gcodegen.config()), m_toolchange_prefix(gcodegen.writer().toolchange_prefix()), m_current_extruder(0)
 {
     this->reset(gcodegen.writer().get_position());
