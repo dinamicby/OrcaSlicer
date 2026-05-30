@@ -355,6 +355,13 @@ static const t_config_enum_values s_keys_map_TimelapseType = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(TimelapseType)
 
+static const t_config_enum_values s_keys_map_MinLayerTimeStrategy = {
+    {"slowdown",      mltsSlowdown},
+    {"park_and_wait", mltsParkAndWait},
+    {"cooling_tower", mltsCoolingTower}
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MinLayerTimeStrategy)
+
 static const t_config_enum_values s_keys_map_SkirtType = {
     { "combined", stCombined },
     { "perobject", stPerObject }
@@ -3868,6 +3875,86 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloats { 10. });
+
+    def = this->add("min_layer_time_strategy", coEnums);
+    def->label = L("Min layer time strategy");
+    def->tooltip = L("How to react when a layer would print faster than slow_down_layer_time. "
+                     "slowdown: reduce feedrates proportionally (legacy). "
+                     "park_and_wait: keep print speed and pause with the head parked over infill. "
+                     "cooling_tower: divert to a hollow spiral-vase tower printed next to the model "
+                     "and keep extruding the tower wall for the duration of the dwell, so the hotend "
+                     "stays under pressure and the model does not get oozed on.");
+    def->enum_keys_map = &ConfigOptionEnum<MinLayerTimeStrategy>::get_enum_values();
+    def->enum_values.push_back("slowdown");
+    def->enum_values.push_back("park_and_wait");
+    def->enum_values.push_back("cooling_tower");
+    def->enum_labels.push_back(L("Slowdown"));
+    def->enum_labels.push_back(L("Park and wait"));
+    def->enum_labels.push_back(L("Cooling tower"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnumsGeneric { static_cast<int>(mltsSlowdown) });
+
+    def = this->add("park_and_wait_retract_length", coFloats);
+    def->label = L("Park retract length");
+    def->tooltip = L("Retract length before parking over infill during a park-and-wait pause. "
+                     "Typically longer than the regular travel retract.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 4.0 });
+
+    def = this->add("park_and_wait_z_hop", coFloats);
+    def->label = L("Park Z-hop");
+    def->tooltip = L("Z lift when moving to the park position. Restored to the original Z "
+                     "before un-retract.");
+    def->sidetext = "mm";
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloats { 0.4 });
+
+    def = this->add("cooling_tower_diameter", coFloat);
+    def->label = L("Cooling tower diameter");
+    def->tooltip = L("Outer diameter of the hollow spiral-vase tower used by the "
+                     "cooling_tower min-layer-time strategy. Larger diameter -> slower "
+                     "vertical growth of the tower per dwell second.");
+    def->sidetext = "mm";
+    def->min = 3;
+    def->max = 80;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.0));
+
+    def = this->add("cooling_tower_speed", coFloat);
+    def->label = L("Cooling tower speed");
+    def->tooltip = L("Extrusion speed at the cooling tower spiral. Slower speed keeps "
+                     "more wait time per millimeter of tower wall and reduces vertical "
+                     "growth per dwell. Defaults to slow_down_min_speed (10 mm/s).");
+    def->sidetext = "mm/s";
+    def->min = 1;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(10.0));
+
+    def = this->add("cooling_tower_min_dwell", coFloat);
+    def->label = L("Cooling tower minimum dwell");
+    def->tooltip = L("Layers that need less than this dwell to reach slow_down_layer_time "
+                     "skip the tower visit entirely (the round-trip travel + retract is "
+                     "not worth the gain). Equivalent to park_and_wait's 1.0s guard.");
+    def->sidetext = "s";
+    def->min = 0;
+    def->max = 30;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.5));
+
+    def = this->add("cooling_tower_position", coPoints);
+    def->label = L("Cooling tower position");
+    def->tooltip = L("Fixed XY position for the cooling tower on the bed. Leave empty to "
+                     "have the slicer auto-place the tower in a free spot next to the "
+                     "model bounding box.");
+    def->sidetext = "mm";
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPoints());
 
     def = this->add("nozzle_diameter", coFloats);
     def->label = L("Nozzle diameter");

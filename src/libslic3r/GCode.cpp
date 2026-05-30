@@ -9,6 +9,7 @@
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
 #include "Geometry/ConvexHull.hpp"
+#include "GCode/CoolingBuffer.hpp"
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
 #include "GCode/WipeTower.hpp"
@@ -26,7 +27,9 @@
 #include <cstdlib>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <math.h>
+#include <optional>
 #include <stdlib.h>
 #include <string>
 #include <utility>
@@ -1796,6 +1799,79 @@ std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Pri
         }
     std::sort(instances.begin(), instances.end(), [](auto& l, auto& r) { return l->model_instance->arrange_order < r->model_instance->arrange_order; });
     return instances;
+}
+
+// Pick a park point inside the given infill polygons, closest to last_pos,
+// pushed inward from polygon boundary by nozzle_diameter and clamped to bed
+// minus a 5mm margin. Returns nullopt if polygons are empty.
+std::optional<Vec2f> compute_park_point_from_polygons(
+    const Polygons&       infill,
+    const Vec2f&          last_pos,
+    float                 nozzle_diameter,
+    const BoundingBoxf&   bed_bbox)
+{
+    if (infill.empty())
+        return std::nullopt;
+
+    // Polygons are in scaled (long) coordinates; last_pos / bed_bbox are mm.
+    const Point last_scaled = Point::new_scale(last_pos.x(), last_pos.y());
+
+    Vec2f  best{0.f, 0.f};
+    double best_d2 = std::numeric_limits<double>::infinity();
+
+    for (const Polygon& poly : infill) {
+        if (poly.points.size() < 3)
+            continue;
+
+        // Nearest point on this polygon's perimeter to the current nozzle pos.
+        const Point proj      = poly.point_projection(last_scaled);
+        const bool  is_inside = poly.contains(last_scaled);
+
+        // If we're already inside the infill, the current position is the
+        // closest valid interior point; otherwise step inward from the
+        // boundary by nozzle_diameter so the parked nozzle sits safely
+        // inside the infill region.
+        Vec2d candidate_mm;
+        if (is_inside) {
+            candidate_mm = Vec2d(double(last_pos.x()), double(last_pos.y()));
+        } else {
+            const Vec2d proj_mm(unscale<double>(proj.x()), unscale<double>(proj.y()));
+            const Vec2d out_mm(double(last_pos.x()) - proj_mm.x(),
+                               double(last_pos.y()) - proj_mm.y());
+            const double n = out_mm.norm();
+            if (n > 1e-6) {
+                // Unit vector from proj toward last_pos points OUT of polygon;
+                // negate it to step INTO the polygon by nozzle_diameter.
+                const Vec2d inward = (-out_mm / n) * double(nozzle_diameter);
+                candidate_mm = proj_mm + inward;
+            } else {
+                candidate_mm = proj_mm;
+            }
+        }
+
+        const Vec2f candidate_f(float(candidate_mm.x()), float(candidate_mm.y()));
+        const double dx = double(candidate_f.x()) - double(last_pos.x());
+        const double dy = double(candidate_f.y()) - double(last_pos.y());
+        const double d2 = dx * dx + dy * dy;
+        if (d2 < best_d2) {
+            best_d2 = d2;
+            best    = candidate_f;
+        }
+    }
+
+    if (! std::isfinite(best_d2))
+        return std::nullopt;
+
+    // Clamp to bed bbox minus a fixed 5 mm margin so the parked nozzle never
+    // ends up outside the printable area.
+    constexpr float margin = 5.f;
+    const float min_x = float(bed_bbox.min.x()) + margin;
+    const float max_x = float(bed_bbox.max.x()) - margin;
+    const float min_y = float(bed_bbox.min.y()) + margin;
+    const float max_y = float(bed_bbox.max.y()) - margin;
+    best.x() = std::clamp(best.x(), min_x, max_x);
+    best.y() = std::clamp(best.y(), min_y, max_y);
+    return best;
 }
 
 enum BambuBedType {
@@ -4479,6 +4555,90 @@ LayerResult GCode::process_layer(
             pos(2) = temp_z_after_timepals_gcode;
             m_writer.set_position(pos);
         }
+        }
+    }
+
+    // Park-and-wait: emit one PARK_HINT comment per extruder configured with
+    // strategy=park_and_wait so the CoolingBuffer pass can rewrite a slow
+    // layer into a real park + dwell instead of a feedrate scale-down.
+    // Skip on the first layer because adhesion is too sensitive to pause.
+    //
+    // Frame-of-reference note: the hint XY must be in G-code (bed) frame
+    // because CoolingBuffer emits it verbatim as a `G0 X Y` move alongside
+    // ordinary extrusion moves that are already bed-frame. We therefore
+    // translate the object-local infill polygons and the writer's last
+    // position into bed frame via point_to_gcode-equivalent (+m_origin
+    // -extruder_offset) before running the park-point search, and clamp
+    // against the bed bbox (also bed frame).
+    if (object_layer != nullptr && object_layer->id() > 0) {
+        BoundingBoxf bed_bbox(print.config().printable_area.values);
+        for (unsigned int extruder_id : layer_tools.extruders) {
+            const int strat = m_config.min_layer_time_strategy.get_at(extruder_id);
+
+            if (strat == static_cast<int>(mltsParkAndWait)) {
+                // Object -> bed translation in scaled units, matching
+                // point_to_gcode(): unscale(p) + m_origin - extruder_offset.
+                const Vec2d ext_off = m_config.extruder_offset.get_at(extruder_id);
+                const Point obj_to_bed(
+                    scale_(m_origin.x() - ext_off.x()),
+                    scale_(m_origin.y() - ext_off.y()));
+
+                // Collect infill surfaces (internal sparse + internal solid + bridge)
+                // across all regions in the current object_layer, then translate
+                // each polygon from object-local into bed frame.
+                Polygons infill;
+                for (const LayerRegion* lr : object_layer->regions()) {
+                    for (const Surface& s : lr->fill_surfaces.surfaces) {
+                        if (s.is_internal() || s.is_solid_infill() || s.is_bridge())
+                            polygons_append(infill, to_polygons(s.expolygon));
+                    }
+                }
+                for (Polygon& p : infill)
+                    p.translate(obj_to_bed);
+
+                // Current nozzle XY in bed-frame mm. We replicate the
+                // point_to_gcode() math here (rather than calling it) so the
+                // extruder_offset matches `extruder_id`, which need not be the
+                // writer's currently-active extruder.
+                const Vec2d last_bed =
+                    unscale(m_last_pos) + m_origin - ext_off;
+                const Vec2f last_mm(float(last_bed.x()), float(last_bed.y()));
+                const float nozzle_d = float(m_config.nozzle_diameter.get_at(extruder_id));
+
+                auto park = compute_park_point_from_polygons(infill, last_mm, nozzle_d, bed_bbox);
+                const Vec2f hint = park.value_or(last_mm);
+
+                char hint_buf[96];
+                snprintf(hint_buf, sizeof(hint_buf),
+                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=park_and_wait\n",
+                         extruder_id, hint.x(), hint.y());
+                gcode += hint_buf;
+
+            } else if (strat == static_cast<int>(mltsCoolingTower)) {
+                // Cooling-tower XY is constant for the whole print. Either
+                // user-pinned via cooling_tower_position, or auto-placed at
+                // the bed's right-front corner (offset by tower radius + margin).
+                // TODO(cooling-tower V2): replace the corner fallback with a
+                // model-bbox-aware placement once we plumb the whole-print bbox
+                // through Print:: into here (compute_cooling_tower_xy already
+                // exists and is unit-tested for this).
+                Vec2f tower_xy;
+                if (! m_config.cooling_tower_position.values.empty()) {
+                    const Vec2d &p = m_config.cooling_tower_position.values.front();
+                    tower_xy = Vec2f(float(p.x()), float(p.y()));
+                } else {
+                    const float half = float(m_config.cooling_tower_diameter.value) * 0.5f + 3.f;
+                    tower_xy = Vec2f(
+                        float(bed_bbox.max.x()) - half,
+                        float(bed_bbox.min.y()) + half);
+                }
+
+                char hint_buf[96];
+                snprintf(hint_buf, sizeof(hint_buf),
+                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=cooling_tower\n",
+                         extruder_id, tower_xy.x(), tower_xy.y());
+                gcode += hint_buf;
+            }
         }
     }
 

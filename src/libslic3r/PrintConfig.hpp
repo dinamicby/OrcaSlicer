@@ -251,6 +251,12 @@ enum TimelapseType : int {
     tlSmooth
 };
 
+enum MinLayerTimeStrategy : int {
+    mltsSlowdown      = 0,
+    mltsParkAndWait   = 1,
+    mltsCoolingTower  = 2,
+};
+
 enum SkirtType {
     stCombined, stPerObject
 };
@@ -471,6 +477,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ForwardCompatibilitySubstitutionRule)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(GCodeThumbnailsFormat)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(CounterboreHoleBridgingOption)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PrintHostType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(MinLayerTimeStrategy)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(AuthorizationType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(WipeTowerWallType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(PerimeterGeneratorType)
@@ -1351,6 +1358,13 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               single_loop_draft_shield))
     ((ConfigOptionFloat,              min_skirt_length))
     ((ConfigOptionFloats,             slow_down_layer_time))
+    ((ConfigOptionEnumsGeneric,       min_layer_time_strategy))
+    ((ConfigOptionFloats,             park_and_wait_retract_length))
+    ((ConfigOptionFloats,             park_and_wait_z_hop))
+    ((ConfigOptionFloat,              cooling_tower_diameter))
+    ((ConfigOptionFloat,              cooling_tower_speed))
+    ((ConfigOptionFloat,              cooling_tower_min_dwell))
+    ((ConfigOptionPoints,             cooling_tower_position))
     ((ConfigOptionBool,               spiral_mode))
     ((ConfigOptionBool,               spiral_mode_smooth))
     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))

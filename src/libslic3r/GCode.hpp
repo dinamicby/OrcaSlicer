@@ -2,6 +2,7 @@
 #define slic3r_GCode_hpp_
 
 #include "libslic3r.h"
+#include "BoundingBox.hpp"
 #include "ExPolygon.hpp"
 #include "GCodeWriter.hpp"
 #include "Layer.hpp"
@@ -29,6 +30,7 @@
 
 #include <memory>
 #include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <cfloat>
@@ -638,6 +640,15 @@ private:
 };
 
 std::vector<const PrintInstance*> sort_object_instances_by_model_order(const Print& print, bool init_order = false);
+
+// Pick a park point inside the given infill polygons, closest to last_pos,
+// pushed inward from polygon boundary by nozzle_diameter and clamped to bed
+// minus a 5mm margin. Returns nullopt if polygons are empty.
+std::optional<Vec2f> compute_park_point_from_polygons(
+    const Polygons&       infill,
+    const Vec2f&          last_pos,
+    float                 nozzle_diameter,
+    const BoundingBoxf&   bed_bbox);
 
 }
 

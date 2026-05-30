@@ -1,10 +1,16 @@
 #include "../GCode.hpp"
 #include "CoolingBuffer.hpp"
+#include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
+#include <cmath>
+#include <cstdio>
+#include <iomanip>
 #include <iostream>
 #include <float.h>
+#include <sstream>
+#include <string_view>
 #include <system_error>
 #include <unordered_map>
 
@@ -17,6 +23,375 @@
 #include <assert.h>
 
 namespace Slic3r {
+
+// Parse a single "; PARK_HINT extruder=N x=X y=Y strategy=..." comment line
+// emitted by GCode::process_layer(). Returns nullopt for any non-PARK_HINT
+// input or malformed line. Tolerates an optional trailing newline so callers
+// can pass either pre-trimmed or raw lines.
+std::optional<ParkHintData> parse_park_hint_line(const std::string &line)
+{
+    static const char PREFIX[] = "; PARK_HINT";
+    if (line.compare(0, sizeof(PREFIX) - 1, PREFIX) != 0)
+        return std::nullopt;
+
+    unsigned int ext_id = 0;
+    float px = 0.f, py = 0.f;
+    char strat[32] = {0};
+    // sscanf with %31s stops at whitespace, so a trailing '\n' is fine.
+    if (std::sscanf(line.c_str(),
+                    "; PARK_HINT extruder=%u x=%f y=%f strategy=%31s",
+                    &ext_id, &px, &py, strat) != 4)
+        return std::nullopt;
+
+    ParkHintData out;
+    out.extruder_id      = ext_id;
+    out.point            = Vec2f(px, py);
+    const std::string_view sv(strat);
+    out.is_park_and_wait = (sv == "park_and_wait");
+    out.is_cooling_tower = (sv == "cooling_tower");
+    return out;
+}
+
+// Compute the wait needed to extend a park-and-wait layer to its minimum
+// layer-time threshold, after subtracting fixed travel/retract/z-hop overhead.
+// Speeds in mm/s; distances in mm; times in s. Returns 0 when already above
+// threshold, when no park_point is available, or when overhead alone closes
+// the gap (no pause necessary at the park point).
+float compute_park_pause_needed(
+    float threshold,
+    float layer_time,
+    std::optional<Vec2f> park_point,
+    Vec2f current_xy,
+    float park_retract_length,
+    float park_z_hop,
+    float travel_speed,
+    float travel_speed_z,
+    float retract_speed)
+{
+    if (layer_time >= threshold) return 0.f;
+    if (! park_point.has_value()) return 0.f;
+
+    // Round-trip distance for each motion (go to park + return).
+    const float dist_to_park = (current_xy - *park_point).norm();
+    const float ts  = std::max(1.f, travel_speed);
+    const float tsz = std::max(1.f, travel_speed_z > 0.f ? travel_speed_z : travel_speed);
+    const float rs  = std::max(1.f, retract_speed);
+
+    const float travel_t  = 2.f * dist_to_park       / ts;
+    const float retract_t = 2.f * park_retract_length / rs;
+    const float zhop_t    = 2.f * park_z_hop          / tsz;
+
+    return std::max(0.f, threshold - layer_time - travel_t - retract_t - zhop_t);
+}
+
+// Format the per-layer park-and-wait gcode sequence (retract, Z-hop, travel,
+// G4 dwell(s), Z-return, unretract) and append to `out`. The pause is split
+// into <=60s G4 chunks so we don't trip firmware that caps G4 P. Z-invariant:
+// the second G1 Z restores the original cur_z BEFORE the unretract, so any
+// ooze drips inside the parked-on infill, not on the next layer.
+void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
+{
+    const float travel_mm_min  = in.travel_speed * 60.f;
+    const float z_mm_min       = (in.travel_speed_z > 0.f
+                                  ? in.travel_speed_z
+                                  : in.travel_speed) * 60.f;
+    const float retract_mm_min = in.retract_speed * 60.f;
+    const int   pause_ms       = int(in.pause_needed * 1000.f);
+    const float park_z         = in.cur_z + in.park_z_hop;
+
+    std::ostringstream s;
+    s << "; PARK_AND_WAIT layer_id=" << in.layer_id
+      << " pause=" << std::fixed << std::setprecision(2) << in.pause_needed << "s"
+      << " park=(" << in.park_point.x() << "," << in.park_point.y() << ")"
+      << " z_hop=" << in.park_z_hop << "\n";
+    // Force absolute E inside the block so that `G92 E0` ... `G1 E0` round-trips
+    // the retract correctly. Without this, a relative-E surrounding profile
+    // turns the closing `G1 E0` into a no-op and the filament stays retracted
+    // by `park_retract_length`, starving the next layer's first extrusion.
+    if (in.use_relative_e_distances) s << "M82\n";
+    s << "G92 E0\n"
+      << "G1 E-" << in.park_retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 Z" << park_z << " F" << int(z_mm_min) << "\n"
+      << "G0 X" << in.park_point.x() << " Y" << in.park_point.y()
+        << " F" << int(travel_mm_min) << "\n";
+
+    // Split G4 into 60s chunks (firmware-portable; some firmwares cap G4 P).
+    int remaining = pause_ms;
+    while (remaining > 0) {
+        int chunk = std::min(remaining, 60000);
+        s << "G4 P" << chunk << "\n";
+        remaining -= chunk;
+    }
+
+    s << "G1 Z" << in.cur_z << " F" << int(z_mm_min) << "\n"
+      << "G1 E0 F" << int(retract_mm_min) << "\n";
+    if (in.use_relative_e_distances) s << "M83\n";
+    s << "; END_PARK_AND_WAIT\n";
+
+    out += s.str();
+}
+
+// Format the cooling-tower visit block: retract, lift to safe Z, travel to
+// tower XY, drop to the spiral start Z (= prev_tower_top + one layer height),
+// unretract, then extrude a continuous spiral of `pause_needed * tower_speed`
+// mm of arc (segmented at 20 polylines per loop). The block ends by lifting
+// back to safe Z, dropping to model cur_z, and retracting for the trip back
+// to the model (the caller emits the return travel). Returns the new
+// tower_top_z so the caller can carry it forward to the next layer's visit.
+//
+// Same E-mode contract as emit_park_sequence: wrapped in M82/M83 when the
+// surrounding profile uses relative E, so the symmetric `G92 E0 ... G1 E0`
+// round-trip resolves correctly.
+float compute_tower_visit_speed(float pause_needed,
+                                float circumference,
+                                float min_speed,
+                                float max_speed)
+{
+    if (pause_needed <= 0.f || circumference <= 0.f)
+        return max_speed;
+    const float desired = circumference / pause_needed;
+    return std::min(max_speed, std::max(min_speed, desired));
+}
+
+float compute_tower_residual_dwell(float pause_needed,
+                                   float actual_speed,
+                                   float circumference)
+{
+    if (actual_speed <= 0.f || circumference <= 0.f)
+        return std::max(0.f, pause_needed);
+    const float loop_time = circumference / actual_speed;
+    return std::max(0.f, pause_needed - loop_time);
+}
+
+float emit_cooling_tower_visit(const CoolingTowerVisitInputs &in, std::string &out)
+{
+    constexpr float PI_F = 3.14159265358979323846f;
+
+    const float travel_mm_min  = in.travel_speed * 60.f;
+    const float z_mm_min       = (in.travel_speed_z > 0.f
+                                  ? in.travel_speed_z
+                                  : in.travel_speed) * 60.f;
+    const float tower_mm_min   = in.tower_speed * 60.f;
+    const float retract_mm_min = in.retract_speed * 60.f;
+
+    const float radius        = in.diameter * 0.5f;
+    const float circumference = PI_F * in.diameter;
+    // Simple rectangular-bead E-per-mm (same approximation libslic3r uses
+    // for spiral_mode; rounded-corner correction is < 5% for typical
+    // 0.42mm/0.2mm beads and not worth complicating the math here).
+    // When target rise is 0 (flat ring), fall back to the bead's line
+    // width as the bead thickness so we still extrude real plastic
+    // instead of an empty trace.
+    const float bead_h        = in.tower_layer_height > 0.f
+                                  ? in.tower_layer_height
+                                  : in.tower_line_width;
+    const float filament_xs   = (PI_F * 0.25f) * in.filament_diameter * in.filament_diameter;
+    const float bead_xs       = in.tower_line_width * bead_h;
+    const float e_per_mm      = bead_xs / filament_xs;
+
+    // V2 contract: spiral starts AT prev_tower_top_z (no step-up gap), so
+    // the tower's vertical growth across visits is bounded by the caller-
+    // supplied target rise (= cur_z - prev_top in the dispatcher).
+    const float z_start       = in.prev_tower_top_z;
+    // Safe travel Z must clear BOTH the model's cur_z and the tower's
+    // upcoming top so we never crash on either while traversing.
+    const float safe_z        = std::max(in.cur_z, z_start + in.tower_layer_height) + in.z_hop;
+
+    // 20 segments per loop = 18° step. Enough for smooth curve, cheap on
+    // gcode size at hundreds of visits per print.
+    static constexpr int SEGMENTS_PER_LOOP = 20;
+    const float seg_arc       = circumference / float(SEGMENTS_PER_LOOP);
+    const float target_arc    = in.tower_speed * in.pause_needed;
+    // Cap at one full loop so per-visit rise is at most tower_layer_height
+    // (i.e. one model layer when the caller passes target_rise = layer_height).
+    const int   nseg          = std::min(SEGMENTS_PER_LOOP,
+                                         std::max(1, int(std::round(target_arc / seg_arc))));
+    const float actual_arc    = float(nseg) * seg_arc;
+    const float tower_top_z   = z_start + (actual_arc / circumference) * in.tower_layer_height;
+
+    std::ostringstream s;
+    s.setf(std::ios::fixed);
+    s << "; COOLING_TOWER_VISIT layer_id=" << in.layer_id
+      << std::setprecision(2)
+      << " pause=" << in.pause_needed << "s"
+      << " xy=(" << in.tower_xy.x() << "," << in.tower_xy.y() << ")"
+      << " arc=" << actual_arc << "mm"
+      << " z_start=" << z_start << " z_top=" << tower_top_z
+      << "\n";
+
+    if (in.use_relative_e_distances) s << "M82\n";
+    s << "G92 E0\n"
+      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 Z" << safe_z << " F" << int(z_mm_min) << "\n"
+      << "G0 X" << std::setprecision(2) << in.tower_xy.x()
+              << " Y" << in.tower_xy.y()
+              << " F" << int(travel_mm_min) << "\n"
+      << "G1 Z" << std::setprecision(2) << z_start << " F" << int(z_mm_min) << "\n"
+      << "G1 E0 F" << int(retract_mm_min) << "\n";
+
+    float accumulated_e   = 0.f;
+    float accumulated_arc = 0.f;
+    for (int i = 1; i <= nseg; ++i) {
+        const float theta  = 2.f * PI_F * (float(i) / float(SEGMENTS_PER_LOOP));
+        const float x      = in.tower_xy.x() + radius * std::cos(theta);
+        const float y      = in.tower_xy.y() + radius * std::sin(theta);
+        accumulated_arc   += seg_arc;
+        const float z      = z_start + (accumulated_arc / circumference) * in.tower_layer_height;
+        accumulated_e     += seg_arc * e_per_mm;
+        s << "G1 X" << std::setprecision(3) << x
+                  << " Y" << y
+                  << " Z" << z
+                  << " E" << accumulated_e
+                  << " F" << int(tower_mm_min) << "\n";
+    }
+
+    // Lift to safe Z, return-travel to model XY is the caller's responsibility,
+    // then drop to cur_z and retract for the trip out.
+    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
+      << "G1 Z" << std::setprecision(2) << in.cur_z << " F" << int(z_mm_min) << "\n"
+      << "G1 E0 F" << int(retract_mm_min) << "\n";
+    if (in.use_relative_e_distances) s << "M83\n";
+    s << "; END_COOLING_TOWER_VISIT\n";
+
+    out += s.str();
+    return tower_top_z;
+}
+
+// Lay a first-layer brim under the cooling tower: N concentric closed loops,
+// each at z = first_layer_z, with the innermost ring at radius =
+// tower_diameter/2 + line_width/2 (so it doesn't overlap the spiral wall
+// above), and each subsequent ring offset outward by `line_width`. One
+// continuous polyline per loop (closed). Sets the tower base — the first
+// emit_cooling_tower_visit call after this will start its spiral at
+// first_layer_z + tower_layer_height. M82/M83-wrapped when relative-E.
+void emit_cooling_tower_brim(const CoolingTowerBrimInputs &in, std::string &out)
+{
+    if (in.loops <= 0) return;
+
+    constexpr float PI_F = 3.14159265358979323846f;
+    constexpr int   SEGMENTS_PER_LOOP = 20;
+
+    const float travel_mm_min  = in.travel_speed * 60.f;
+    const float z_mm_min       = (in.travel_speed_z > 0.f
+                                  ? in.travel_speed_z
+                                  : in.travel_speed) * 60.f;
+    const float brim_mm_min    = in.speed * 60.f;
+    const float retract_mm_min = in.retract_speed * 60.f;
+
+    const float filament_xs = (PI_F * 0.25f) * in.filament_diameter * in.filament_diameter;
+    const float bead_xs     = in.line_width * in.first_layer_z;
+    const float e_per_mm    = bead_xs / filament_xs;
+
+    const float safe_z      = in.first_layer_z + 0.4f;   // small lift before travel
+
+    std::ostringstream s;
+    s.setf(std::ios::fixed);
+    s << "; COOLING_TOWER_BRIM xy=(" << std::setprecision(2)
+      << in.tower_xy.x() << "," << in.tower_xy.y() << ")"
+      << " loops=" << in.loops
+      << " z=" << in.first_layer_z << "\n";
+
+    if (in.use_relative_e_distances) s << "M82\n";
+    s << "G92 E0\n"
+      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 Z" << safe_z << " F" << int(z_mm_min) << "\n"
+      << "G0 X" << std::setprecision(2) << in.tower_xy.x()
+              << " Y" << in.tower_xy.y()
+              << " F" << int(travel_mm_min) << "\n"
+      << "G1 Z" << std::setprecision(2) << in.first_layer_z << " F" << int(z_mm_min) << "\n"
+      << "G1 E0 F" << int(retract_mm_min) << "\n";
+
+    float accumulated_e = 0.f;
+    for (int loop = 0; loop < in.loops; ++loop) {
+        // Innermost loop sits just outside the spiral wall: r0 = D/2 + W/2.
+        // Each further loop is W outward.
+        const float r = in.tower_diameter * 0.5f
+                        + in.line_width * 0.5f
+                        + float(loop) * in.line_width;
+        // Approach the start of this loop (theta = 0 -> +x of center).
+        const float x0 = in.tower_xy.x() + r;
+        const float y0 = in.tower_xy.y();
+        s << "G0 X" << std::setprecision(3) << x0
+                  << " Y" << y0
+                  << " F" << int(travel_mm_min) << "\n";
+        // Emit the closed loop (20 segments + 1 closing segment back to start).
+        for (int i = 1; i <= SEGMENTS_PER_LOOP; ++i) {
+            const float theta = 2.f * PI_F * (float(i) / float(SEGMENTS_PER_LOOP));
+            const float x     = in.tower_xy.x() + r * std::cos(theta);
+            const float y     = in.tower_xy.y() + r * std::sin(theta);
+            const float seg   = 2.f * PI_F * r / float(SEGMENTS_PER_LOOP);
+            accumulated_e    += seg * e_per_mm;
+            s << "G1 X" << std::setprecision(3) << x
+                      << " Y" << y
+                      << " E" << accumulated_e
+                      << " F" << int(brim_mm_min) << "\n";
+        }
+    }
+
+    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
+      << "G1 E0 F" << int(retract_mm_min) << "\n";
+    if (in.use_relative_e_distances) s << "M83\n";
+    s << "; END_COOLING_TOWER_BRIM\n";
+
+    out += s.str();
+}
+
+// Pick an XY for the cooling tower next to the model. Tries — in order —
+// right, left, back, front of the model bbox; falls back to the first bed
+// corner that fits. Result is guaranteed inside `bed` (clamped after each
+// candidate). margin is the gap between the tower's bounding circle and
+// the model bbox edge.
+Vec2f compute_cooling_tower_xy(
+    const BoundingBoxf &model_bbox,
+    const BoundingBoxf &bed,
+    float diameter,
+    float margin)
+{
+    const float half = diameter * 0.5f + margin;
+    const float cy   = float((model_bbox.min.y() + model_bbox.max.y()) * 0.5);
+    const float cx   = float((model_bbox.min.x() + model_bbox.max.x()) * 0.5);
+
+    auto inside_bed = [&](float x, float y) {
+        return x - half >= bed.min.x() && x + half <= bed.max.x()
+            && y - half >= bed.min.y() && y + half <= bed.max.y();
+    };
+
+    // 1. Right of model.
+    {
+        const float x = float(model_bbox.max.x()) + half;
+        if (inside_bed(x, cy)) return Vec2f(x, cy);
+    }
+    // 2. Left of model.
+    {
+        const float x = float(model_bbox.min.x()) - half;
+        if (inside_bed(x, cy)) return Vec2f(x, cy);
+    }
+    // 3. Back of model.
+    {
+        const float y = float(model_bbox.max.y()) + half;
+        if (inside_bed(cx, y)) return Vec2f(cx, y);
+    }
+    // 4. Front of model.
+    {
+        const float y = float(model_bbox.min.y()) - half;
+        if (inside_bed(cx, y)) return Vec2f(cx, y);
+    }
+    // 5. Bed corners (front-left, front-right, back-left, back-right).
+    const Vec2f corners[4] = {
+        Vec2f(float(bed.min.x()) + half, float(bed.min.y()) + half),
+        Vec2f(float(bed.max.x()) - half, float(bed.min.y()) + half),
+        Vec2f(float(bed.min.x()) + half, float(bed.max.y()) - half),
+        Vec2f(float(bed.max.x()) - half, float(bed.max.y()) - half),
+    };
+    for (const Vec2f &p : corners)
+        if (inside_bed(p.x(), p.y())) return p;
+
+    // Last resort: bed center, clamped — caller must accept that this may
+    // overlap the model. Better than returning out-of-bed coordinates.
+    return Vec2f(
+        std::min(std::max(cx, float(bed.min.x()) + half), float(bed.max.x()) - half),
+        std::min(std::max(cy, float(bed.min.y()) + half), float(bed.max.y()) - half));
+}
 
 CoolingBuffer::CoolingBuffer(GCode &gcodegen) : m_config(gcodegen.config()), m_toolchange_prefix(gcodegen.writer().toolchange_prefix()), m_current_extruder(0)
 {
@@ -41,6 +416,10 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_fan_speed = -1;
     m_additional_fan_speed = -1;
     m_current_fan_speed = -1;
+    // Cooling tower state is per-print; clear it so a new print starts with
+    // a fresh tower at Z=0 with no brim emitted yet.
+    m_cooling_tower_top_z = 0.f;
+    m_cooling_tower_brim_emitted = false;
 }
 
 struct CoolingLine
@@ -236,6 +615,16 @@ struct PerExtruderAdjustments
     
     bool                        dont_slow_down_outer_wall = false;
 
+    // Cooling strategy state (populated from PARK_HINT comment if present).
+    // CoolingTower behaves identically to ParkAndWait for the pause computation
+    // (both incur the same round-trip overhead), differing only in which
+    // emitter is invoked in apply_layer_cooldown.
+    enum class CoolingStrategy { Slowdown, ParkAndWait, CoolingTower };
+    CoolingStrategy             cooling_strategy = CoolingStrategy::Slowdown;
+    float                       park_retract_length = 0.f;
+    float                       park_z_hop = 0.f;
+    std::optional<Vec2f>        park_point;
+    float                       pause_needed = 0.f;
 
     // Parsed lines.
     std::vector<CoolingLine>    lines;
@@ -346,6 +735,21 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         adj.slow_down_min_speed           = float(m_config.slow_down_min_speed.get_at(extruder_id));
         // ORCA: To enable dont slow down external perimeters feature per filament (extruder)
         adj.dont_slow_down_outer_wall   = m_config.dont_slow_down_outer_wall.get_at(extruder_id);
+        // Park-and-wait / cooling-tower: per-extruder strategy + retract/z-hop
+        // hints. Cooling tower reuses park_and_wait_retract_length / z_hop for
+        // its visit travel — the kinematics of "lift, travel, drop" are the
+        // same; only the in-block behaviour differs (G4 dwell vs spiral wall).
+        adj.park_retract_length  = float(m_config.park_and_wait_retract_length.get_at(extruder_id));
+        adj.park_z_hop           = float(m_config.park_and_wait_z_hop.get_at(extruder_id));
+        {
+            const int strat = m_config.min_layer_time_strategy.get_at(extruder_id);
+            if (strat == static_cast<int>(mltsParkAndWait))
+                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::ParkAndWait;
+            else if (strat == static_cast<int>(mltsCoolingTower))
+                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::CoolingTower;
+            else
+                adj.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::Slowdown;
+        }
         map_extruder_to_per_extruder_adjustment[extruder_id] = i;
     }
 
@@ -540,6 +944,22 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 (pos_P > 0) ? atof(sline.c_str() + pos_P + 1) * 0.001 : 0.);
         } else if (boost::starts_with(sline, ";_FORCE_RESUME_FAN_SPEED")) {
             line.type = CoolingLine::TYPE_FORCE_RESUME_FAN;
+        } else if (boost::starts_with(sline, "; PARK_HINT")) {
+            // Park-and-wait hint emitted by GCode::process_layer. Populates the
+            // corresponding extruder's park_point + cooling_strategy. Malformed
+            // lines are silently ignored — adj.cooling_strategy then keeps the
+            // default (Slowdown) set above, so cooling degrades gracefully.
+            if (auto hint = parse_park_hint_line(sline);
+                hint && hint->extruder_id < map_extruder_to_per_extruder_adjustment.size())
+            {
+                auto &a = per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[hint->extruder_id]];
+                a.park_point = hint->point;
+                if (hint->is_park_and_wait)
+                    a.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::ParkAndWait;
+                else if (hint->is_cooling_tower)
+                    a.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::CoolingTower;
+            }
+            // line.type stays 0 → not stored in adjustment->lines (comment, no time cost).
         }
 
         // Orca: For any movements before this layer's first ever extrusion, we exclude them from the layer time calculation.
@@ -649,6 +1069,32 @@ float CoolingBuffer::calculate_layer_slowdown(std::vector<PerExtruderAdjustments
         adj.time_total  = adj.elapsed_time_total();
         // Maximum time for this extruder, when all extrusion moves are slowed down to min_extrusion_speed.
         adj.time_maximum = adj.maximum_time_after_slowdown(true);
+        // ParkAndWait / CoolingTower: do NOT stretch feedrates. Instead compute
+        // the pause needed at the park point (later consumed by apply_layer_cooldown)
+        // and treat this extruder as non-adjustable for the rest of the layer.
+        // Both strategies pay the same round-trip overhead (retract, lift, travel
+        // both ways, z-hop) — compute_park_pause_needed is shared.
+        if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::ParkAndWait
+            || adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::CoolingTower) {
+            const float travel_speed  = float(m_config.travel_speed.value);
+            const float z_speed       = float(m_config.travel_speed_z.value);
+            const float retract_speed = adj.extruder_id < m_config.retraction_speed.size()
+                ? float(m_config.retraction_speed.get_at(adj.extruder_id))
+                : travel_speed;
+            const Vec2f current_xy(m_current_pos[0], m_current_pos[1]);
+            adj.pause_needed = compute_park_pause_needed(
+                adj.slow_down_layer_time,
+                adj.time_total,
+                adj.park_point,
+                current_xy,
+                adj.park_retract_length,
+                adj.park_z_hop,
+                travel_speed,
+                z_speed,
+                retract_speed);
+            elapsed_time_total0 += adj.time_total;
+            continue;
+        }
         if (adj.cooling_slow_down_enabled && adj.lines.size() > 0) {
             by_slowdown_time.emplace_back(&adj);
             // sorts the lines, also sets adj.time_non_adjustable
@@ -1005,6 +1451,150 @@ std::string CoolingBuffer::apply_layer_cooldown(
     const char *gcode_end = gcode.c_str() + gcode.size();
     if (pos < gcode_end)
         new_gcode.append(pos, gcode_end - pos);
+
+    // Park-and-wait / cooling-tower: dispatch the per-extruder cooling block.
+    // Runs AFTER all per-extruder slowdown logic so the layer-time accounting
+    // is final. pause_needed < 1.0s (park) or < cooling_tower_min_dwell
+    // (tower) is treated as "not worth the round-trip" and skipped.
+    for (PerExtruderAdjustments &adj : per_extruder_adjustments) {
+        if (! adj.park_point.has_value())
+            continue;
+
+        const float travel_speed  = float(m_config.travel_speed.value);
+        const float z_speed       = float(m_config.travel_speed_z.value);
+        const float retract_speed = adj.extruder_id < m_config.retraction_speed.size()
+                                    ? float(m_config.retraction_speed.get_at(adj.extruder_id))
+                                    : travel_speed;
+        const bool  rel_e         = m_config.use_relative_e_distances.value;
+
+        if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::ParkAndWait) {
+            if (adj.pause_needed < 1.0f) continue;
+            ParkSequenceInputs in;
+            in.layer_id            = int(layer_id);
+            in.park_point          = *adj.park_point;
+            in.cur_z               = m_current_pos[2];
+            in.park_z_hop          = adj.park_z_hop;
+            in.pause_needed        = adj.pause_needed;
+            in.park_retract_length = adj.park_retract_length;
+            in.travel_speed        = travel_speed;
+            in.travel_speed_z      = z_speed;
+            in.retract_speed       = retract_speed;
+            in.use_relative_e_distances = rel_e;
+            emit_park_sequence(in, new_gcode);
+
+        } else if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::CoolingTower) {
+            const float min_dwell = float(m_config.cooling_tower_min_dwell.value);
+            if (adj.pause_needed < min_dwell) continue;
+
+            // First-ever visit on this print: lay the brim down once so the
+            // tower has bed adhesion. This runs before the first spiral, at
+            // the model's first-layer Z.
+            if (! m_cooling_tower_brim_emitted) {
+                const int brim_loops = 4;  // V1 default; TODO: expose as config
+                CoolingTowerBrimInputs brim;
+                brim.tower_xy          = *adj.park_point;
+                brim.loops             = brim_loops;
+                brim.first_layer_z     = float(m_config.initial_layer_print_height.value);
+                brim.tower_diameter    = float(m_config.cooling_tower_diameter.value);
+                brim.line_width        = float(m_config.initial_layer_line_width.get_abs_value(
+                                              m_config.nozzle_diameter.get_at(adj.extruder_id)));
+                brim.filament_diameter = adj.extruder_id < m_config.filament_diameter.size()
+                                         ? float(m_config.filament_diameter.get_at(adj.extruder_id))
+                                         : 1.75f;
+                brim.speed             = float(m_config.cooling_tower_speed.value);
+                brim.travel_speed      = travel_speed;
+                brim.travel_speed_z    = z_speed;
+                brim.retract_length    = adj.park_retract_length;
+                brim.retract_speed     = retract_speed;
+                brim.use_relative_e_distances = rel_e;
+                emit_cooling_tower_brim(brim, new_gcode);
+                m_cooling_tower_top_z = brim.first_layer_z;
+                m_cooling_tower_brim_emitted = true;
+            }
+
+            // V2 contract: per-visit rise is bounded by how far the model has
+            // climbed since the previous tower top. This couples the tower's
+            // vertical growth to the model so the spiral can never run away
+            // toward printable_height (the old contract grew the tower at
+            // tower_speed * pause / circumference loops per visit, which
+            // outpaced the model by ~3-4x in typical configs).
+            const float cur_z       = m_current_pos[2];
+            const float target_rise = std::max(0.f, cur_z - m_cooling_tower_top_z);
+
+            // Tower top has already caught up with (or overshot) the model.
+            // Absorb pause_needed as a plain G4 at the model — visiting the
+            // tower with zero rise would double a flat ring onto the brim's
+            // outermost loop on the brim layer or onto the previous visit's
+            // top ring on subsequent layers.
+            constexpr float kEpsilonRise = 0.01f;
+            if (target_rise < kEpsilonRise) {
+                int remaining_ms = int(std::round(adj.pause_needed * 1000.f));
+                char buf[96];
+                std::snprintf(buf, sizeof(buf),
+                              "; COOLING_TOWER_NO_RISE layer_id=%d pause=%.2fs\n",
+                              int(layer_id), double(adj.pause_needed));
+                new_gcode += buf;
+                while (remaining_ms > 0) {
+                    const int chunk_ms = std::min(remaining_ms, 60000);
+                    std::snprintf(buf, sizeof(buf), "G4 P%d\n", chunk_ms);
+                    new_gcode += buf;
+                    remaining_ms -= chunk_ms;
+                }
+                continue;
+            }
+
+            constexpr float PI_F             = 3.14159265358979323846f;
+            constexpr float kMinSpiralSpeed  = 1.5f;  // mm/s; below this -> underextrusion
+            const float diameter      = float(m_config.cooling_tower_diameter.value);
+            const float circumference = PI_F * diameter;
+            const float max_speed     = float(m_config.cooling_tower_speed.value);
+            const float actual_speed  = compute_tower_visit_speed(adj.pause_needed,
+                                                                  circumference,
+                                                                  kMinSpiralSpeed,
+                                                                  max_speed);
+            const float residual_s    = compute_tower_residual_dwell(adj.pause_needed,
+                                                                     actual_speed,
+                                                                     circumference);
+
+            CoolingTowerVisitInputs in;
+            in.layer_id            = int(layer_id);
+            in.tower_xy            = *adj.park_point;
+            in.prev_tower_top_z    = m_cooling_tower_top_z;
+            in.cur_z               = cur_z;
+            in.z_hop               = adj.park_z_hop;
+            in.pause_needed        = adj.pause_needed;
+            in.retract_length      = adj.park_retract_length;
+            in.diameter            = diameter;
+            in.tower_layer_height  = target_rise;
+            in.tower_line_width    = adj.extruder_id < m_config.filament_diameter.size()
+                                     ? float(m_config.nozzle_diameter.get_at(adj.extruder_id))
+                                     : 0.4f;
+            in.filament_diameter   = adj.extruder_id < m_config.filament_diameter.size()
+                                     ? float(m_config.filament_diameter.get_at(adj.extruder_id))
+                                     : 1.75f;
+            in.tower_speed         = actual_speed;
+            in.travel_speed        = travel_speed;
+            in.travel_speed_z      = z_speed;
+            in.retract_speed       = retract_speed;
+            in.use_relative_e_distances = rel_e;
+
+            m_cooling_tower_top_z = emit_cooling_tower_visit(in, new_gcode);
+
+            // Speed was clamped to the floor -> one loop alone could not absorb
+            // pause_needed. Add a G4 dwell for the leftover so the layer still
+            // gets its full cooling time.
+            if (residual_s > 0.f) {
+                int remaining_ms = int(std::round(residual_s * 1000.f));
+                while (remaining_ms > 0) {
+                    const int chunk_ms = std::min(remaining_ms, 60000);
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "G4 P%d\n", chunk_ms);
+                    new_gcode += buf;
+                    remaining_ms -= chunk_ms;
+                }
+            }
+        }
+    }
 
     return new_gcode;
 }
