@@ -1506,8 +1506,23 @@ std::string CoolingBuffer::apply_layer_cooldown(
             emit_park_sequence(in, new_gcode);
 
         } else if (adj.cooling_strategy == PerExtruderAdjustments::CoolingStrategy::CoolingTower) {
-            const float min_dwell = float(m_config.cooling_tower_min_dwell.value);
-            if (adj.pause_needed < min_dwell) continue;
+            // V2.1 continuity invariant: every eligible model layer emits
+            // EXACTLY ONE full tower loop. V2 dispatch used to skip visits
+            // when `pause_needed < cooling_tower_min_dwell`, which broke
+            // the tower physically — the spiral grew gaps on fast layers
+            // and the next visit either traveled through air or laid a
+            // single ring on a stale top many layers below the model,
+            // collapsing the wall. Now: always visit, let loop speed pick
+            // up the dwell.
+            //   - pause_needed == 0 (layer already cool enough): loop runs
+            //     at the configured max speed; ~circumference/max_speed
+            //     seconds of extra extrusion keep the wall continuous.
+            //   - pause_needed > one-loop time at max speed: loop runs at
+            //     the speed that makes one loop fit the pause exactly.
+            //   - pause_needed > one-loop time at min speed: loop runs at
+            //     min speed and the residual is absorbed by G4 below.
+            // `cooling_tower_min_dwell` is no longer consulted here — the
+            // schema field is kept (deprecated) until a breaking release.
 
             // First-ever visit on this print: lay the brim down once so the
             // tower has bed adhesion. This runs before the first spiral, at
@@ -1571,10 +1586,21 @@ std::string CoolingBuffer::apply_layer_cooldown(
             const float diameter      = float(m_config.cooling_tower_diameter.value);
             const float circumference = PI_F * diameter;
             const float max_speed     = float(m_config.cooling_tower_speed.value);
-            const float actual_speed  = compute_tower_visit_speed(adj.pause_needed,
+            // Floor `effective_pause` to "one full loop at max speed" so the
+            // emitter's `nseg = round(speed * pause / seg_arc)` always
+            // resolves to SEGMENTS_PER_LOOP, even when `pause_needed == 0`.
+            // Without this floor the visit collapses to a single segment
+            // and the tower wall develops gaps (the bug user surfaced on
+            // 2026-05-30).
+            const float min_loop_pause  = max_speed > 0.f ? circumference / max_speed : 0.f;
+            const float effective_pause = std::max(adj.pause_needed, min_loop_pause);
+            const float actual_speed  = compute_tower_visit_speed(effective_pause,
                                                                   circumference,
                                                                   kMinSpiralSpeed,
                                                                   max_speed);
+            // Residual G4 is keyed off the ORIGINAL pause — we only owe the
+            // user the cooling time they asked for; the bonus time spent on
+            // the continuity loop doesn't count.
             const float residual_s    = compute_tower_residual_dwell(adj.pause_needed,
                                                                      actual_speed,
                                                                      circumference);
@@ -1585,7 +1611,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
             in.prev_tower_top_z    = m_cooling_tower_top_z;
             in.cur_z               = cur_z;
             in.z_hop               = adj.park_z_hop;
-            in.pause_needed        = adj.pause_needed;
+            in.pause_needed        = effective_pause;
             in.retract_length      = adj.park_retract_length;
             in.diameter            = diameter;
             in.tower_layer_height  = target_rise;
