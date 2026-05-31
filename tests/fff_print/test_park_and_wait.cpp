@@ -23,6 +23,9 @@ static CoolingTowerVisitInputs make_tower_inputs() {
     CoolingTowerVisitInputs in{};
     in.layer_id           = 5;
     in.tower_xy           = Vec2f(200.f, 50.f);
+    // Pre-visit head position on the model — distinct from tower_xy so tests
+    // can verify the visit returns the head here before dropping Z.
+    in.return_xy          = Vec2f(150.f, 50.f);
     in.prev_tower_top_z   = 1.0f;
     in.cur_z              = 1.2f;
     in.z_hop              = 0.4f;
@@ -140,6 +143,47 @@ TEST_CASE("emit_cooling_tower_visit caps spiral at one full loop for long dwell"
 
     // Vertical rise is capped at tower_layer_height (0.2) regardless of dwell.
     CHECK(top == Approx(1.2f).margin(0.001f));
+}
+
+// Regression: every cooling-tower visit MUST return the head to `return_xy`
+// at `cur_z` before the closing deretract, so that any deferred wipe or
+// next-print travel finds the head where it expects (on the model). The pre-
+// fix code dropped Z back to cur_z while still at the tower XY, then the
+// follow-on wipe move ("G1 X<last-extrusion> E-...") executed as a 30–50mm
+// diagonal traverse across the build at print Z — visible in 3DBenchy_PA prints
+// as cobweb stringing concentrated around small upper features (cabin, funnel)
+// because the wipe path crossed straight through them.
+TEST_CASE("emit_cooling_tower_visit returns head to return_xy before dropping Z",
+          "[cooling_tower][cooling]") {
+    auto in = make_tower_inputs();  // tower_xy=(200,50), return_xy=(150,50), cur_z=1.2
+    std::string out;
+    emit_cooling_tower_visit(in, out);
+
+    // Tail of the visit, after END_COOLING_TOWER_VISIT, must contain a travel
+    // back to return_xy. We locate the LAST G0 X… Y… in the block and confirm
+    // its coordinates match return_xy.
+    const size_t end_marker = out.find("; END_COOLING_TOWER_VISIT");
+    REQUIRE(end_marker != std::string::npos);
+
+    // The return travel must happen INSIDE the visit block, not after it,
+    // so the visit hands the caller a head positioned at return_xy.
+    const std::string body = out.substr(0, end_marker);
+
+    // Find the LAST G0 in the body (the return travel).
+    const size_t last_g0 = body.rfind("G0 X");
+    REQUIRE(last_g0 != std::string::npos);
+
+    // After the last G0, before END, the only Z motion must drop from safe_z
+    // BACK to cur_z (1.20) — never above. And the deretract `G1 E0` must
+    // happen AFTER the return travel.
+    const std::string tail = body.substr(last_g0);
+    CHECK(tail.find("X150.00 Y50.00") != std::string::npos);  // return travel
+    // The Z drop and deretract sit after the return travel.
+    const size_t pos_z_drop = tail.find("G1 Z1.20");
+    const size_t pos_unret  = tail.find("G1 E0 F");
+    CHECK(pos_z_drop != std::string::npos);
+    CHECK(pos_unret  != std::string::npos);
+    CHECK(pos_z_drop < pos_unret);
 }
 
 TEST_CASE("emit_cooling_tower_visit zero-rise spiral lays a flat ring at prev_top",
@@ -620,6 +664,45 @@ TEST_CASE("emit_park_sequence produces well-formed block with Z-invariant", "[pa
 // `use_relative_e_distances = 1`, `G1 E0` becomes a no-op (relative move of 0)
 // and the filament stays retracted, starving the next layer's first extrusion
 // of pressure. Fix: wrap the block in M82/M83 when relative-E is active.
+// Regression: same return-to-model invariant as emit_cooling_tower_visit. The
+// pre-fix sequence dropped Z back to cur_z while still at the park point, then
+// any deferred wipe/next-print code executed assuming the head was on the model.
+// Result: a long diagonal traverse across the build at print Z, depositing ooze
+// across upper-layer features. Fix: end the block with a travel back to
+// `return_xy` BEFORE the closing Z-drop and deretract.
+TEST_CASE("emit_park_sequence returns head to return_xy before dropping Z",
+          "[park_and_wait][cooling]") {
+    ParkSequenceInputs in{};
+    in.layer_id            = 7;
+    in.park_point          = Vec2f(15.5f, 12.3f);
+    in.return_xy           = Vec2f(80.f, 75.f);  // distinct from park_point
+    in.cur_z               = 1.2f;
+    in.park_z_hop          = 0.4f;
+    in.pause_needed        = 5.3f;
+    in.park_retract_length = 4.0f;
+    in.travel_speed        = 200.f;
+    in.travel_speed_z      = 10.f;
+    in.retract_speed       = 30.f;
+
+    std::string out;
+    emit_park_sequence(in, out);
+
+    const size_t end_marker = out.find("; END_PARK_AND_WAIT");
+    REQUIRE(end_marker != std::string::npos);
+    const std::string body = out.substr(0, end_marker);
+
+    // After the G4 dwell(s), the block must travel back to return_xy BEFORE the
+    // Z-drop + deretract pair. Locate the return travel and verify ordering.
+    const size_t pos_return  = body.find("G0 X80.00 Y75.00");
+    const size_t pos_z_drop  = body.find("G1 Z1.20");
+    const size_t pos_unret   = body.find("G1 E0 F");
+    REQUIRE(pos_return  != std::string::npos);
+    REQUIRE(pos_z_drop  != std::string::npos);
+    REQUIRE(pos_unret   != std::string::npos);
+    CHECK(pos_return < pos_z_drop);
+    CHECK(pos_z_drop < pos_unret);
+}
+
 TEST_CASE("emit_park_sequence wraps block in M82/M83 when use_relative_e_distances=true",
           "[park_and_wait][cooling]") {
     ParkSequenceInputs in{};
