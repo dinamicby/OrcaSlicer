@@ -517,6 +517,11 @@ private:
     bool                                m_enable_cooling_markers;
     
     bool m_enable_exclude_object;
+    // Cached once per print: does any layer print fast enough to need cooling?
+    // When false, the cooling-tower strategy emits no PARK_HINTs at all (a print
+    // whose every layer is already slow enough needs no tower). std::optional so
+    // the (whole-print) scan runs lazily on the first cooling-tower layer.
+    std::optional<bool> m_print_needs_cooling_tower;
     std::vector<size_t> m_label_objects_ids;
     std::string _encode_label_ids_to_base64(std::vector<size_t> ids);
     // ORCA: Add support for role based fan speed control

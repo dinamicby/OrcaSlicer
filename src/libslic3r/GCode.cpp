@@ -3658,6 +3658,31 @@ std::string GCode::generate_skirt(const Print &print,
     return gcode;
 }
 
+// Whole-print scan for the cooling-tower skip decision (issue: don't print a
+// tower when no layer ever needs cooling). Sums each layer's extrusion length
+// and hands it to the conservative `any_layer_needs_cooling` lower-bound test.
+// Speed bound = travel_speed (>= any extrusion speed), so we only conclude
+// "no tower" when every layer is provably slow enough.
+static bool gcode_print_needs_cooling_tower(const Print &print, const PrintConfig &config)
+{
+    float threshold = 0.f;
+    for (double t : config.slow_down_layer_time.values)
+        threshold = std::max(threshold, float(t));
+    const float vmax = std::max(1.f, float(config.travel_speed.value));
+
+    std::vector<float> layer_lengths_mm;
+    for (const PrintObject *object : print.objects()) {
+        layer_lengths_mm.reserve(layer_lengths_mm.size() + object->layers().size());
+        for (const Layer *layer : object->layers()) {
+            double scaled_len = 0.;
+            for (const LayerRegion *region : layer->regions())
+                scaled_len += region->perimeters.length() + region->fills.length();
+            layer_lengths_mm.push_back(float(unscale<double>(scaled_len)));
+        }
+    }
+    return any_layer_needs_cooling(layer_lengths_mm, vmax, threshold);
+}
+
 // In sequential mode, process_layer is called once per each object and its copy,
 // therefore layers will contain a single entry and single_object_instance_idx will point to the copy of the object.
 // In non-sequential mode, process_layer is called per each print_z height with all object and support layers accumulated.
@@ -4615,6 +4640,15 @@ LayerResult GCode::process_layer(
                 gcode += hint_buf;
 
             } else if (strat == static_cast<int>(mltsCoolingTower)) {
+                // Skip the tower entirely when no layer of the print is fast
+                // enough to need cooling. Decided once (whole-print scan) and
+                // cached; emitting no PARK_HINT means the CoolingBuffer builds
+                // no tower at all.
+                if (! m_print_needs_cooling_tower.has_value())
+                    m_print_needs_cooling_tower = gcode_print_needs_cooling_tower(print, m_config);
+                if (! *m_print_needs_cooling_tower)
+                    continue;
+
                 // Cooling-tower XY is constant for the whole print. Priority:
                 //   1. user-pinned via cooling_tower_position
                 //   2. auto-placed adjacent to the model union bbox

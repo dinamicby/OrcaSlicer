@@ -179,6 +179,21 @@ float cooling_tower_diameter_for_height(float configured_diameter,
     return std::max(configured_diameter, model_height / max_aspect_ratio);
 }
 
+bool any_layer_needs_cooling(const std::vector<float> &layer_extrusion_lengths_mm,
+                             float max_extrusion_speed,
+                             float min_layer_time)
+{
+    if (max_extrusion_speed <= 0.f || min_layer_time <= 0.f)
+        return false;
+    for (const float len : layer_extrusion_lengths_mm) {
+        if (len <= 0.f)
+            continue;  // empty layer -> nothing to cool
+        if (len / max_extrusion_speed < min_layer_time)
+            return true;  // even at max speed this layer is too fast -> keep tower
+    }
+    return false;  // every non-empty layer is provably slow enough
+}
+
 float compute_tower_residual_dwell(float pause_needed,
                                    float actual_speed,
                                    float circumference)

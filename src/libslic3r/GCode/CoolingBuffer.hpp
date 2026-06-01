@@ -5,6 +5,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <vector>
 #include <cfloat>
 
 namespace Slic3r {
@@ -196,6 +197,21 @@ float cooling_tower_diameter_for_height(
     float configured_diameter,
     float model_height,
     float max_aspect_ratio);
+
+// Decide whether a print needs a cooling tower at all. The tower exists to add
+// cooling time on short layers; if EVERY layer prints longer than the minimum
+// layer time, no layer needs cooling and the whole tower can be skipped. Because
+// the decision must be made before layer 1 (Z-sync), this works from a per-layer
+// extrusion-length estimate: time_lower_bound = length / max_extrusion_speed.
+// Using the MAX speed makes the time a lower bound, so a layer is flagged as
+// possibly-needing-cooling only when even its fastest-case time is below the
+// threshold — i.e. we keep the tower unless we're certain it is unnecessary
+// (never wrongly removes a needed tower). Empty layers (no extrusion) are
+// ignored. Returns false when there is no threshold (min_layer_time <= 0).
+bool any_layer_needs_cooling(
+    const std::vector<float> &layer_extrusion_lengths_mm,
+    float max_extrusion_speed,
+    float min_layer_time);
 
 // Pick a free XY for the cooling tower next to the model. Tries — in order —
 // the right, left, back, and front edge of the model bbox (margin from bbox +

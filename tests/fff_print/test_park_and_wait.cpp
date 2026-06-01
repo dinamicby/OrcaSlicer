@@ -300,6 +300,21 @@ TEST_CASE("cooling_tower_diameter_for_height widens the tower for tall models",
     CHECK(Slic3r::cooling_tower_diameter_for_height(15.f, 400.f, 0.f) == Approx(15.f));
 }
 
+// The tower is only worth printing when some layer is too fast to cool on its
+// own. With a conservative lower-bound time (length / max speed), a print is
+// flagged as needing the tower unless EVERY non-empty layer is provably slow.
+TEST_CASE("any_layer_needs_cooling flags a print only when some layer is too fast",
+          "[cooling_tower][cooling]") {
+    // All layers comfortably slow (>2000 mm at 200 mm/s -> >10 s): no tower.
+    CHECK_FALSE(Slic3r::any_layer_needs_cooling({3000.f, 4000.f, 5000.f}, 200.f, 10.f));
+    // One short layer (300 mm -> 1.5 s < 10 s): tower needed.
+    CHECK(Slic3r::any_layer_needs_cooling({3000.f, 300.f, 4000.f}, 200.f, 10.f));
+    // Empty layers (no extrusion) are ignored — nothing to cool.
+    CHECK_FALSE(Slic3r::any_layer_needs_cooling({0.f, 3000.f}, 200.f, 10.f));
+    // No threshold -> never needs a tower.
+    CHECK_FALSE(Slic3r::any_layer_needs_cooling({100.f}, 200.f, 0.f));
+}
+
 TEST_CASE("compute_tower_visit_speed returns desired speed when in range",
           "[cooling_tower][cooling]") {
     // circumference 47.124 mm, pause 5.236 s -> desired = 9.0 mm/s
