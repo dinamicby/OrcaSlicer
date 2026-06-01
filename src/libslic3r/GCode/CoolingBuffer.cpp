@@ -6,6 +6,7 @@
 #include <boost/log/trivial.hpp>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <float.h>
@@ -49,6 +50,11 @@ std::optional<ParkHintData> parse_park_hint_line(const std::string &line)
     const std::string_view sv(strat);
     out.is_park_and_wait = (sv == "park_and_wait");
     out.is_cooling_tower = (sv == "cooling_tower");
+    // Optional trailing "diam=<mm>" (cooling-tower height-scaled diameter).
+    // Absent on park_and_wait hints and on older cooling_tower hints — leave 0
+    // so the CoolingBuffer falls back to the configured diameter.
+    if (const size_t p = line.find("diam="); p != std::string::npos)
+        out.tower_diameter = std::strtof(line.c_str() + p + 5, nullptr);
     return out;
 }
 
@@ -163,6 +169,16 @@ float compute_tower_visit_speed(float pause_needed,
     return std::min(max_speed, std::max(min_speed, desired));
 }
 
+float cooling_tower_diameter_for_height(float configured_diameter,
+                                        float model_height,
+                                        float max_aspect_ratio)
+{
+    if (max_aspect_ratio <= 0.f)
+        return configured_diameter;
+    // Widen so height / diameter <= max_aspect_ratio; never below the config.
+    return std::max(configured_diameter, model_height / max_aspect_ratio);
+}
+
 float compute_tower_residual_dwell(float pause_needed,
                                    float actual_speed,
                                    float circumference)
@@ -263,7 +279,17 @@ float emit_cooling_tower_visit(const CoolingTowerVisitInputs &in, std::string &o
     // across the build at print height, dragging the nozzle through any small
     // upper features and depositing fine strings (3DBenchy PA "cobweb"
     // regression). See test_park_and_wait.cpp:"returns head to return_xy".
-    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
+    // Re-zero E before the closing retract. The spiral left E at +accumulated_e;
+    // a bare `G1 E0` here (the pre-fix code) retracts that ENTIRE amount, pulling
+    // filament clear out of the melt zone and starving the next layer's first
+    // extrusion (3DBenchy PA: under-extrusion gaps). After `G92 E0` the closing
+    // retract/un-retract round-trips a fixed `retract_length`, exactly like the
+    // opening pair, no matter how much plastic the spiral laid down. The retract
+    // happens BEFORE the lift+travel so the back-traverse is dry; the un-retract
+    // re-primes over the return position.
+    s << "G92 E0\n"
+      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
       << "G0 X" << in.return_xy.x() << " Y" << in.return_xy.y()
         << " F" << int(travel_mm_min) << "\n"
       << "G1 Z" << std::setprecision(2) << in.cur_z << " F" << int(z_mm_min) << "\n"
@@ -346,7 +372,13 @@ void emit_cooling_tower_brim(const CoolingTowerBrimInputs &in, std::string &out)
         }
     }
 
-    s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
+    // Re-zero E so the closing retract pulls back a fixed `retract_length`
+    // instead of unwinding the whole brim (~13 mm of accumulated E across the
+    // loops). See emit_cooling_tower_visit for the full rationale — a bare
+    // `G1 E0` here was the catastrophic field case (starved the next layer).
+    s << "G92 E0\n"
+      << "G1 E-" << std::setprecision(2) << in.retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
       << "G1 E0 F" << int(retract_mm_min) << "\n";
     if (in.use_relative_e_distances) s << "M83\n";
     s << "; END_COOLING_TOWER_BRIM\n";
@@ -534,6 +566,20 @@ struct PerExtruderAdjustments
             time_total += line.time;
         return time_total;
     }
+    // Fastest extrusion feedrate (mm/s) on this layer. The cooling tower uses
+    // this as its "fast" ceiling so a layer that needs no extra cooling lays
+    // the continuity loop at the model's own print speed instead of crawling
+    // at cooling_tower_speed. Extrusion feedrate lives on the TYPE_ADJUSTABLE
+    // speed-modifier lines; travel (G0) is excluded. Tower/park extruders are
+    // never slowed (calculate_layer_slowdown skips them), so these stay at the
+    // model's nominal speeds. Returns 0 when the layer had no extrusion.
+    float max_extrusion_feedrate() const {
+        float mx = 0.f;
+        for (const CoolingLine &line : lines)
+            if ((line.type & CoolingLine::TYPE_ADJUSTABLE) && line.feedrate > mx)
+                mx = line.feedrate;
+        return mx;
+    }
     // Calculate the total elapsed time when slowing down 
     // to the minimum extrusion feed rate defined for the current material.
     float maximum_time_after_slowdown(bool slowdown_external_perimeters) const {
@@ -665,6 +711,9 @@ struct PerExtruderAdjustments
     float                       park_retract_length = 0.f;
     float                       park_z_hop = 0.f;
     std::optional<Vec2f>        park_point;
+    // Height-scaled cooling-tower diameter (mm) from the PARK_HINT; 0 -> use the
+    // configured cooling_tower_diameter.
+    float                       tower_diameter = 0.f;
     float                       pause_needed = 0.f;
 
     // Parsed lines.
@@ -995,6 +1044,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             {
                 auto &a = per_extruder_adjustments[map_extruder_to_per_extruder_adjustment[hint->extruder_id]];
                 a.park_point = hint->point;
+                a.tower_diameter = hint->tower_diameter;
                 if (hint->is_park_and_wait)
                     a.cooling_strategy = PerExtruderAdjustments::CoolingStrategy::ParkAndWait;
                 else if (hint->is_cooling_tower)
@@ -1546,16 +1596,27 @@ std::string CoolingBuffer::apply_layer_cooldown(
             // `cooling_tower_min_dwell` is no longer consulted here — the
             // schema field is kept (deprecated) until a breaking release.
 
+            // The first tower layer (brim + first spiral) must print slow for
+            // bed adhesion, regardless of how fast the model prints — captured
+            // before the brim flips the flag below.
+            const bool first_tower_layer = ! m_cooling_tower_brim_emitted;
+
             // First-ever visit on this print: lay the brim down once so the
             // tower has bed adhesion. This runs before the first spiral, at
             // the model's first-layer Z.
+            // Height-scaled diameter from the PARK_HINT (widened for tall models);
+            // fall back to the configured diameter when the hint carried none.
+            const float tower_diameter = adj.tower_diameter > 0.f
+                                         ? adj.tower_diameter
+                                         : float(m_config.cooling_tower_diameter.value);
+
             if (! m_cooling_tower_brim_emitted) {
                 const int brim_loops = 4;  // V1 default; TODO: expose as config
                 CoolingTowerBrimInputs brim;
                 brim.tower_xy          = *adj.park_point;
                 brim.loops             = brim_loops;
                 brim.first_layer_z     = float(m_config.initial_layer_print_height.value);
-                brim.tower_diameter    = float(m_config.cooling_tower_diameter.value);
+                brim.tower_diameter    = tower_diameter;
                 brim.line_width        = float(m_config.initial_layer_line_width.get_abs_value(
                                               m_config.nozzle_diameter.get_at(adj.extruder_id)));
                 brim.filament_diameter = adj.extruder_id < m_config.filament_diameter.size()
@@ -1605,9 +1666,22 @@ std::string CoolingBuffer::apply_layer_cooldown(
 
             constexpr float PI_F             = 3.14159265358979323846f;
             constexpr float kMinSpiralSpeed  = 1.5f;  // mm/s; below this -> underextrusion
-            const float diameter      = float(m_config.cooling_tower_diameter.value);
+            const float diameter      = tower_diameter;  // height-scaled (see above)
             const float circumference = PI_F * diameter;
-            const float max_speed     = float(m_config.cooling_tower_speed.value);
+            // Fast ceiling = the model's own layer print speed, so a layer that
+            // needs no cooling (pause_needed == 0) lays the continuity loop fast
+            // instead of crawling at cooling_tower_speed. Layers that DO need
+            // cooling still slow down: compute_tower_visit_speed scales the loop
+            // toward kMinSpiralSpeed and any leftover becomes a G4 dwell below.
+            // cooling_tower_speed is the fallback when the layer had no measurable
+            // extrusion (degenerate) — and stays the slow brim speed for adhesion.
+            // The FIRST tower layer always prints slow (cooling_tower_speed) for
+            // bed adhesion: a fast first ring would not bond to the brim/bed.
+            const float cooling_speed = float(m_config.cooling_tower_speed.value);
+            const float model_speed   = adj.max_extrusion_feedrate();
+            const float max_speed     = first_tower_layer
+                                        ? cooling_speed
+                                        : (model_speed > 0.f ? model_speed : cooling_speed);
             // Floor `effective_pause` to "one full loop at max speed" so the
             // emitter's `nseg = round(speed * pause / seg_arc)` always
             // resolves to SEGMENTS_PER_LOOP, even when `pause_needed == 0`.

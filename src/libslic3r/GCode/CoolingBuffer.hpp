@@ -27,6 +27,10 @@ struct ParkHintData {
     // True iff the strategy token equals "cooling_tower". Mutually exclusive
     // with is_park_and_wait; the parser will only ever set one of them.
     bool         is_cooling_tower = false;
+    // Cooling-tower diameter (mm) chosen by GCode for this print (widened for
+    // tall models). 0 when absent (older hints / non-tower strategies) — the
+    // CoolingBuffer then falls back to the configured cooling_tower_diameter.
+    float        tower_diameter = 0.f;
 };
 std::optional<ParkHintData> parse_park_hint_line(const std::string &line);
 
@@ -181,6 +185,17 @@ struct CoolingTowerBrimInputs {
     bool    use_relative_e_distances = false;
 };
 void emit_cooling_tower_brim(const CoolingTowerBrimInputs &in, std::string &out);
+
+// Effective cooling-tower diameter (mm) for a model of the given height. A tall,
+// thin single-wall tower topples or snaps mid-print, so the diameter is widened
+// to keep the height:diameter aspect ratio at or below `max_aspect_ratio`. Short
+// models keep `configured_diameter` (the lower bound). Pure so it can be unit-
+// tested; called once per print by GCode (which knows the model height) and the
+// result is carried to the CoolingBuffer via the PARK_HINT.
+float cooling_tower_diameter_for_height(
+    float configured_diameter,
+    float model_height,
+    float max_aspect_ratio);
 
 // Pick a free XY for the cooling tower next to the model. Tries — in order —
 // the right, left, back, and front edge of the model bbox (margin from bbox +

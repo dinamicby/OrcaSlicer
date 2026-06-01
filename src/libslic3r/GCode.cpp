@@ -4638,15 +4638,31 @@ LayerResult GCode::process_layer(
                     model_bb.merge(unscale(model_bb_scaled.min));
                     model_bb.merge(unscale(model_bb_scaled.max));
                 }
+                // Model height (mm) = the tallest object's top printed Z. A tall,
+                // thin single-wall tower topples/snaps mid-print, so widen the
+                // diameter to keep the height:diameter ratio bounded. Computed once
+                // here (GCode knows the geometry) and carried to the CoolingBuffer
+                // via the hint's diam= field; the placement search uses it too so
+                // the wider tower still fits beside the model.
+                double model_height = 0.;
+                for (const PrintObject *object : print.objects())
+                    if (! object->layers().empty())
+                        model_height = std::max(model_height, object->layers().back()->print_z);
+                constexpr float kMaxTowerAspectRatio = 10.f;  // height:diameter cap
+                const float tower_diameter = cooling_tower_diameter_for_height(
+                    float(m_config.cooling_tower_diameter.value),
+                    float(model_height),
+                    kMaxTowerAspectRatio);
+
                 const Vec2f tower_xy = resolve_cooling_tower_xy(
                     bed_bbox, model_bb,
-                    float(m_config.cooling_tower_diameter.value),
+                    tower_diameter,
                     m_config.cooling_tower_position.values);
 
-                char hint_buf[96];
+                char hint_buf[128];
                 snprintf(hint_buf, sizeof(hint_buf),
-                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=cooling_tower\n",
-                         extruder_id, tower_xy.x(), tower_xy.y());
+                         "; PARK_HINT extruder=%u x=%.3f y=%.3f strategy=cooling_tower diam=%.3f\n",
+                         extruder_id, tower_xy.x(), tower_xy.y(), tower_diameter);
                 gcode += hint_buf;
             }
         }

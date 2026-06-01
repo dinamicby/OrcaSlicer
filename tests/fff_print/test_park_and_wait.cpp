@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <cstdlib>
 #include <sstream>
 #include <string>
 
@@ -40,6 +41,48 @@ static CoolingTowerVisitInputs make_tower_inputs() {
     in.travel_speed_z     = 10.f;
     in.retract_speed      = 30.f;
     return in;
+}
+
+static CoolingTowerBrimInputs make_brim_inputs() {
+    CoolingTowerBrimInputs in{};
+    in.tower_xy          = Vec2f(200.f, 50.f);
+    in.loops             = 4;
+    in.first_layer_z     = 0.3f;
+    in.tower_diameter    = 15.f;
+    in.line_width        = 0.42f;
+    in.filament_diameter = 1.75f;
+    in.speed             = 10.f;
+    in.travel_speed      = 200.f;
+    in.travel_speed_z    = 10.f;
+    in.retract_length    = 4.f;
+    in.retract_speed     = 30.f;
+    return in;
+}
+
+// Walk a cooling-tower block, tracking the absolute E coordinate (the block
+// always runs in absolute E — wrapped in M82/M83 when the profile is relative,
+// and re-zeroed with `G92 E0`). Returns the largest single retraction, i.e.
+// the most filament pulled back in one G1 move. A correct block never retracts
+// more than `retract_length` at once; the pre-fix closing `G1 E0` retracted the
+// WHOLE accumulated spiral (≈13.5 mm for the brim), yanking filament out of the
+// melt zone. This helper makes that invariant assertable.
+static float max_single_retraction(const std::string& gcode) {
+    std::istringstream in(gcode);
+    std::string line;
+    float e = 0.f, max_ret = 0.f;
+    while (std::getline(in, line)) {
+        const bool is_g92 = line.rfind("G92", 0) == 0;
+        const bool is_move = line.rfind("G1", 0) == 0 || line.rfind("G0", 0) == 0;
+        if (!is_g92 && !is_move) continue;
+        const size_t p = line.find('E');
+        if (p == std::string::npos) continue;
+        const float ne = std::strtof(line.c_str() + p + 1, nullptr);
+        if (is_g92) { e = ne; continue; }
+        const float d = ne - e;
+        if (d < 0.f && -d > max_ret) max_ret = -d;
+        e = ne;
+    }
+    return max_ret;
 }
 
 TEST_CASE("emit_cooling_tower_visit emits one full loop for a circumference-worth dwell",
@@ -203,6 +246,60 @@ TEST_CASE("emit_cooling_tower_visit zero-rise spiral lays a flat ring at prev_to
     CHECK(out.find("z_start=5.00") != std::string::npos);
 }
 
+// Regression (3DBenchy_PA crooked + gappy prints): the closing retract of a
+// tower visit must pull back exactly `retract_length`, INDEPENDENT of how much
+// filament the spiral extruded. The pre-fix block re-zeroed E with `G92 E0`,
+// extruded the spiral up to E=accumulated_e, then closed with a bare `G1 E0`,
+// which in absolute E retracts the WHOLE spiral — starving the next layer's
+// first extrusion (under-extrusion gaps).
+TEST_CASE("emit_cooling_tower_visit closing retract is bounded by retract_length",
+          "[cooling_tower][cooling]") {
+    auto in = make_tower_inputs();
+    in.use_relative_e_distances = true;       // 3DBenchy PA profile uses relative E
+    // Fat bead so one loop extrudes far more than retract_length; the pre-fix
+    // closing `G1 E0` would retract that whole amount instead of retract_length.
+    in.tower_line_width   = 1.0f;
+    in.tower_layer_height = 0.5f;
+    in.retract_length     = 4.f;
+
+    std::string out;
+    emit_cooling_tower_visit(in, out);
+
+    const float r = max_single_retraction(out);
+    CHECK(r <= in.retract_length + 0.01f);    // never unwind the spiral
+    CHECK(r >= in.retract_length - 0.01f);    // but a real travel retract still happens
+}
+
+// Same invariant for the first-layer brim — this is the catastrophic case in
+// the field: 4 brim loops accumulate ~13.5 mm of E, and the pre-fix closing
+// `G1 E0` retracted all of it at once.
+TEST_CASE("emit_cooling_tower_brim closing retract is bounded by retract_length",
+          "[cooling_tower][cooling]") {
+    auto in = make_brim_inputs();
+    in.use_relative_e_distances = true;
+
+    std::string out;
+    emit_cooling_tower_brim(in, out);
+
+    const float r = max_single_retraction(out);
+    CHECK(r <= in.retract_length + 0.01f);    // pre-fix: ~13.5 mm (whole brim)
+    CHECK(r >= in.retract_length - 0.01f);
+}
+
+// A tall, thin tower topples mid-print; widen the diameter so the height:diameter
+// aspect ratio stays bounded. Short models keep the configured diameter.
+TEST_CASE("cooling_tower_diameter_for_height widens the tower for tall models",
+          "[cooling_tower][cooling]") {
+    // Short model (Benchy, 48 mm): configured diameter is already within ratio.
+    CHECK(Slic3r::cooling_tower_diameter_for_height(15.f, 48.f, 10.f) == Approx(15.f));
+    // Tall model (400 mm): widen to keep height:diameter <= 10:1 -> 40 mm.
+    CHECK(Slic3r::cooling_tower_diameter_for_height(15.f, 400.f, 10.f) == Approx(40.f));
+    // Never narrower than the configured diameter.
+    CHECK(Slic3r::cooling_tower_diameter_for_height(20.f, 100.f, 10.f) == Approx(20.f));
+    // Degenerate aspect ratio -> fall back to configured diameter.
+    CHECK(Slic3r::cooling_tower_diameter_for_height(15.f, 400.f, 0.f) == Approx(15.f));
+}
+
 TEST_CASE("compute_tower_visit_speed returns desired speed when in range",
           "[cooling_tower][cooling]") {
     // circumference 47.124 mm, pause 5.236 s -> desired = 9.0 mm/s
@@ -256,6 +353,17 @@ TEST_CASE("parse_park_hint_line recognizes strategy=cooling_tower",
     CHECK(hint->is_cooling_tower);
     CHECK(hint->point.x() == Approx(300.f).margin(0.01f));
     CHECK(hint->point.y() == Approx(20.f).margin(0.01f));
+    // No diam= field -> tower_diameter stays 0 (fall back to config).
+    CHECK(hint->tower_diameter == Approx(0.f));
+}
+
+TEST_CASE("parse_park_hint_line reads the optional diam= field",
+          "[cooling_tower][cooling]") {
+    auto hint = Slic3r::parse_park_hint_line(
+        "; PARK_HINT extruder=0 x=300.000 y=20.000 strategy=cooling_tower diam=40.000");
+    REQUIRE(hint.has_value());
+    CHECK(hint->is_cooling_tower);
+    CHECK(hint->tower_diameter == Approx(40.f).margin(0.01f));
 }
 
 TEST_CASE("compute_cooling_tower_xy places tower to the right of model bbox when bed has room",
