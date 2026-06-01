@@ -3658,6 +3658,21 @@ std::string GCode::generate_skirt(const Print &print,
     return gcode;
 }
 
+// Sum the extrusion length of a collection. ExtrusionEntityCollection::length()
+// deliberately throws (a collection has no single length), so recurse over the
+// entities and only call length() on the leaf paths/loops.
+static double sum_extrusion_length(const ExtrusionEntityCollection &coll)
+{
+    double len = 0.;
+    for (const ExtrusionEntity *e : coll.entities) {
+        if (e->is_collection())
+            len += sum_extrusion_length(*static_cast<const ExtrusionEntityCollection *>(e));
+        else
+            len += e->length();
+    }
+    return len;
+}
+
 // Whole-print scan for the cooling-tower skip decision (issue: don't print a
 // tower when no layer ever needs cooling). Sums each layer's extrusion length
 // and hands it to the conservative `any_layer_needs_cooling` lower-bound test.
@@ -3676,7 +3691,8 @@ static bool gcode_print_needs_cooling_tower(const Print &print, const PrintConfi
         for (const Layer *layer : object->layers()) {
             double scaled_len = 0.;
             for (const LayerRegion *region : layer->regions())
-                scaled_len += region->perimeters.length() + region->fills.length();
+                scaled_len += sum_extrusion_length(region->perimeters)
+                            + sum_extrusion_length(region->fills);
             layer_lengths_mm.push_back(float(unscale<double>(scaled_len)));
         }
     }
