@@ -85,10 +85,14 @@ float compute_park_pause_needed(
 }
 
 // Format the per-layer park-and-wait gcode sequence (retract, Z-hop, travel,
-// G4 dwell(s), Z-return, unretract) and append to `out`. The pause is split
-// into <=60s G4 chunks so we don't trip firmware that caps G4 P. Z-invariant:
-// the second G1 Z restores the original cur_z BEFORE the unretract, so any
-// ooze drips inside the parked-on infill, not on the next layer.
+// G4 dwell(s), return-XY at safe Z, drop Z, unretract) and append to `out`.
+// The pause is split into <=60s G4 chunks so we don't trip firmware that caps
+// G4 P. Position-invariant: after the dwell the head travels back to
+// `return_xy` AT the z-hopped park_z BEFORE dropping to cur_z and
+// unretracting, so the block hands the caller a head positioned exactly where
+// it was at entry. Skipping the back-travel left the head at the park point —
+// any follow-on wipe then dragged the nozzle diagonally across the build at
+// print Z, depositing ooze across upper-layer features.
 void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
 {
     const float travel_mm_min  = in.travel_speed * 60.f;
@@ -100,8 +104,9 @@ void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
     const float park_z         = in.cur_z + in.park_z_hop;
 
     std::ostringstream s;
+    s.setf(std::ios::fixed);
     s << "; PARK_AND_WAIT layer_id=" << in.layer_id
-      << " pause=" << std::fixed << std::setprecision(2) << in.pause_needed << "s"
+      << " pause=" << std::setprecision(2) << in.pause_needed << "s"
       << " park=(" << in.park_point.x() << "," << in.park_point.y() << ")"
       << " z_hop=" << in.park_z_hop << "\n";
     // Force absolute E inside the block so that `G92 E0` ... `G1 E0` round-trips
@@ -110,7 +115,7 @@ void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
     // by `park_retract_length`, starving the next layer's first extrusion.
     if (in.use_relative_e_distances) s << "M82\n";
     s << "G92 E0\n"
-      << "G1 E-" << in.park_retract_length << " F" << int(retract_mm_min) << "\n"
+      << "G1 E-" << std::setprecision(2) << in.park_retract_length << " F" << int(retract_mm_min) << "\n"
       << "G1 Z" << park_z << " F" << int(z_mm_min) << "\n"
       << "G0 X" << in.park_point.x() << " Y" << in.park_point.y()
         << " F" << int(travel_mm_min) << "\n";
@@ -123,7 +128,12 @@ void emit_park_sequence(const ParkSequenceInputs &in, std::string &out)
         remaining -= chunk;
     }
 
-    s << "G1 Z" << in.cur_z << " F" << int(z_mm_min) << "\n"
+    // Travel back to the model XY at the z-hopped park_z (still clear of the
+    // print), THEN drop Z to cur_z, THEN unretract. The deretract happens over
+    // return_xy at cur_z — exactly where the wipe (if any) expects the head.
+    s << "G0 X" << in.return_xy.x() << " Y" << in.return_xy.y()
+        << " F" << int(travel_mm_min) << "\n"
+      << "G1 Z" << in.cur_z << " F" << int(z_mm_min) << "\n"
       << "G1 E0 F" << int(retract_mm_min) << "\n";
     if (in.use_relative_e_distances) s << "M83\n";
     s << "; END_PARK_AND_WAIT\n";
@@ -245,9 +255,17 @@ float emit_cooling_tower_visit(const CoolingTowerVisitInputs &in, std::string &o
                   << " F" << int(tower_mm_min) << "\n";
     }
 
-    // Lift to safe Z, return-travel to model XY is the caller's responsibility,
-    // then drop to cur_z and retract for the trip out.
+    // Lift to safe Z, travel back to the model XY (return_xy) at safe Z so we
+    // clear both the spiral wall and any printed structures along the way,
+    // THEN drop to cur_z and unretract over the return position. Skipping the
+    // back-travel (the pre-fix behavior) left the head at the tower XY at
+    // print Z — the next deferred wipe move then traversed 30-50mm diagonally
+    // across the build at print height, dragging the nozzle through any small
+    // upper features and depositing fine strings (3DBenchy PA "cobweb"
+    // regression). See test_park_and_wait.cpp:"returns head to return_xy".
     s << "G1 Z" << std::setprecision(2) << safe_z << " F" << int(z_mm_min) << "\n"
+      << "G0 X" << in.return_xy.x() << " Y" << in.return_xy.y()
+        << " F" << int(travel_mm_min) << "\n"
       << "G1 Z" << std::setprecision(2) << in.cur_z << " F" << int(z_mm_min) << "\n"
       << "G1 E0 F" << int(retract_mm_min) << "\n";
     if (in.use_relative_e_distances) s << "M83\n";
@@ -1495,6 +1513,10 @@ std::string CoolingBuffer::apply_layer_cooldown(
             ParkSequenceInputs in;
             in.layer_id            = int(layer_id);
             in.park_point          = *adj.park_point;
+            // Pre-call head position so the block can travel back here before
+            // dropping Z. m_current_pos was last updated by the final extrusion
+            // of this layer (or the previous park/visit's own return travel).
+            in.return_xy           = Vec2f(float(m_current_pos[0]), float(m_current_pos[1]));
             in.cur_z               = m_current_pos[2];
             in.park_z_hop          = adj.park_z_hop;
             in.pause_needed        = adj.pause_needed;
@@ -1608,6 +1630,12 @@ std::string CoolingBuffer::apply_layer_cooldown(
             CoolingTowerVisitInputs in;
             in.layer_id            = int(layer_id);
             in.tower_xy            = *adj.park_point;
+            // Pre-call head position so the visit can travel back here before
+            // dropping Z. The pre-fix code left the head at the tower XY, and
+            // any subsequent deferred wipe would then traverse the build at
+            // print Z — visible as cobweb stringing across small upper features
+            // in 3DBenchy PA prints.
+            in.return_xy           = Vec2f(float(m_current_pos[0]), float(m_current_pos[1]));
             in.prev_tower_top_z    = m_cooling_tower_top_z;
             in.cur_z               = cur_z;
             in.z_hop               = adj.park_z_hop;

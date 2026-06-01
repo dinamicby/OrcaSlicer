@@ -54,6 +54,13 @@ float compute_park_pause_needed(
 struct ParkSequenceInputs {
     int     layer_id;
     Vec2f   park_point;
+    // Pre-call XY of the print head, in model coordinates. The block ends by
+    // travelling back here BEFORE dropping Z and unretracting, so any deferred
+    // wipe or next-print move executes from the expected position on the
+    // model. Pre-fix code skipped this travel and the head was left at the
+    // park point — subsequent wipe traverses then dragged the nozzle diagonally
+    // across the build at print Z. Caller passes m_current_pos[0/1].
+    Vec2f   return_xy;
     float   cur_z;                  // mm
     float   park_z_hop;             // mm
     float   pause_needed;           // seconds
@@ -103,6 +110,14 @@ void emit_park_sequence(const ParkSequenceInputs &in, std::string &out);
 struct CoolingTowerVisitInputs {
     int     layer_id;
     Vec2f   tower_xy;
+    // Pre-call XY of the print head, in model coordinates. The block ends by
+    // travelling back here BEFORE dropping Z and unretracting, so any deferred
+    // wipe or next-print move executes from the expected position on the
+    // model. Pre-fix code skipped this travel and the head was left at the
+    // tower — subsequent wipe traverses then dragged the nozzle diagonally
+    // across the build at print Z (root cause of cobweb stringing around small
+    // upper features in 3DBenchy PA prints). Caller passes m_current_pos[0/1].
+    Vec2f   return_xy;
     float   prev_tower_top_z;       // mm; 0 at print start
     float   cur_z;                  // mm; model's current Z (return point)
     float   z_hop;                  // mm
