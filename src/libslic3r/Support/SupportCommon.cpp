@@ -1655,7 +1655,16 @@ void generate_support_toolpaths(
         {
             SupportLayer &support_layer = *support_layers[support_layer_id];
             LayerCache   &layer_cache   = layer_caches[support_layer_id];
-            const float   support_interface_angle = (support_params.support_style == smsGrid || config.support_interface_pattern == smipRectilinear) ?
+            // "Rectilinear interlaced" must alternate the interface fill angle per
+            // interface layer so consecutive layers (and the model's first layer
+            // above the support) cross instead of fusing. For normal support the
+            // style is normalized smsDefault -> smsGrid (see SupportParameters), and
+            // the grid branch below would otherwise pin a fixed angle and silently
+            // defeat the interlaced pattern. Give the interlaced pattern the
+            // alternating angle regardless of style.
+            const bool    interlaced_interface  = config.support_interface_pattern == smipRectilinearInterlaced;
+            const float   support_interface_angle = (! interlaced_interface &&
+                    (support_params.support_style == smsGrid || config.support_interface_pattern == smipRectilinear)) ?
                 support_params.interface_angle : support_params.raft_interface_angle(support_layer.interface_id());
 
             // Find polygons with the same print_z.
