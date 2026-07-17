@@ -1032,7 +1032,10 @@ private:
     PrintRegionPtrs                         m_print_regions;
     
     //SoftFever
-    bool m_isBBLPrinter;
+    // NSDMI: never left uninitialized — embedded callers construct Print directly
+    // (no GUI/CLI preset plumbing), and this flag silently selects the G-code
+    // label dialect (BBL "; FEATURE:" vs classic ";TYPE:") via GCodeProcessor.
+    bool m_isBBLPrinter = false;
 
     // Ordered collections of extrusion paths to build skirt loops and brim.
     ExtrusionEntityCollection               m_skirt;
