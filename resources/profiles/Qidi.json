@@ -13,6 +13,10 @@
             "sub_path": "machine/Qidi Q2.json"
         },
         {
+            "name": "Qidi Q2C",
+            "sub_path": "machine/Qidi Q2C.json"
+        },
+        {
             "name": "Qidi X-CF Pro",
             "sub_path": "machine/Qidi X-CF Pro.json"
         },
@@ -25,6 +29,10 @@
             "sub_path": "machine/Qidi X-Max 3.json"
         },
         {
+            "name": "Qidi X-Max 4",
+            "sub_path": "machine/Qidi X-Max 4.json"
+        },
+        {
             "name": "Qidi X-Plus",
             "sub_path": "machine/Qidi X-Plus.json"
         },
@@ -35,6 +43,10 @@
         {
             "name": "Qidi X-Plus 4",
             "sub_path": "machine/Qidi X-Plus 4.json"
+        },
+        {
+            "name": "Qidi X-Plus 5",
+            "sub_path": "machine/Qidi X-Plus 5.json"
         },
         {
             "name": "Qidi X-Smart 3",
