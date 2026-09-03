@@ -128,7 +128,17 @@ SlicingParameters SlicingParameters::create_from_config(
     }
 
     if (params.base_raft_layers > 0) {
-		params.interface_raft_layers = (params.base_raft_layers + 1) / 2;
+        // `raft_interface_layers` overrides the historical half-and-half split.
+        // Clamped to leave at least one layer on each side: the branch below
+        // asserts both counts are non-zero. A raft of a single layer has no
+        // split to speak of — it is handled by the `raft_layers() == 1` branch
+        // and the option is ignored there.
+        const int requested_interface = object_config.raft_interface_layers.value;
+        if (requested_interface > 0 && params.base_raft_layers > 1)
+            params.interface_raft_layers = std::min<size_t>(size_t(requested_interface),
+                                                            params.base_raft_layers - 1);
+        else
+            params.interface_raft_layers = (params.base_raft_layers + 1) / 2;
         params.base_raft_layers -= params.interface_raft_layers;
         // Use as large as possible layer height for the intermediate raft layers.
         params.base_raft_layer_height       = std::max(params.layer_height, 0.75 * support_material_extruder_dmr);
