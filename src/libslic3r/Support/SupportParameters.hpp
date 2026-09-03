@@ -114,6 +114,14 @@ struct SupportParameters {
         this->base_fill_pattern =
             support_pattern == smpHoneycomb ? ipHoneycomb :
             this->support_density > 0.95 || this->with_sheath ? ipRectilinear : ipSupportBase;
+        // `supportbase` is how raft_pattern spells "as the supports do": keep the
+        // conditional logic above, including the promotion to rectilinear at high
+        // density. Any other value is an explicit choice and wins as-is.
+        this->raft_base_fill_pattern = object_config.raft_pattern.value == ipSupportBase ?
+            this->base_fill_pattern : object_config.raft_pattern.value;
+        // Zero inherits the support base density — the historical behaviour.
+        this->raft_base_density = object_config.raft_base_density.value > 0 ?
+            std::min(1., 0.01 * object_config.raft_base_density.value) : this->support_density;
         this->interface_fill_pattern = (this->interface_density > 0.95 ? ipRectilinear : ipSupportBase);
         this->raft_interface_fill_pattern = this->raft_interface_density > 0.95 ? ipRectilinear : ipSupportBase;
         if (object_config.support_interface_pattern == smipGrid)
@@ -246,6 +254,11 @@ struct SupportParameters {
 
     // Pattern of the sparse infill including sparse raft layers.
     InfillPattern           base_fill_pattern;
+    // Pattern and density of the sparse *middle* raft layers. Split off from
+    // base_fill_pattern/support_density so a raft can be tuned without
+    // touching the supports that may print in the same job.
+    InfillPattern           raft_base_fill_pattern;
+    coordf_t                raft_base_density;
     // Pattern of the top / bottom interface and contact layers.
     InfillPattern           interface_fill_pattern;
     // Pattern of the raft interface and contact layers.
@@ -265,6 +278,18 @@ struct SupportParameters {
     float 					raft_interface_angle(size_t interface_id) const 
     	{ return this->raft_angle_interface + ((interface_id & 1) ? float(- M_PI / 4.) : float(+ M_PI / 4.)); }
 		
+    // What the sparse middle raft layers are filled with. Single seam: future
+    // raft knobs (per-layer density ramp, alternating angles, stiffness zones)
+    // attach here instead of threading conditions through SupportCommon.
+    struct RaftBaseFill {
+        InfillPattern pattern;
+        float         density;
+        float         angle;
+    };
+    RaftBaseFill raft_base_fill() const {
+        return { this->raft_base_fill_pattern, float(this->raft_base_density), this->raft_angle_base };
+    }
+
     bool independent_layer_height = false;
     const double thresh_big_overhang = Slic3r::sqr(scale_(10));
 

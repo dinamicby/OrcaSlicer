@@ -1501,6 +1501,21 @@ void generate_support_toolpaths(
 
     BoundingBox bbox_object(Point(-scale_(1.), -scale_(1.0)), Point(scale_(1.), scale_(1.)));
 
+    // The raft fillers historically get a 2 mm placeholder box: the rectilinear
+    // patterns only use it as an alignment reference, so it never mattered.
+    // Plane-path patterns (Hilbert curve, Archimedean chords, octagram spiral)
+    // size their curve grid from this box and would collapse to a stub, so an
+    // explicitly chosen raft pattern gets the real raft footprint instead. The
+    // default pattern keeps the placeholder and today's output is unchanged.
+    BoundingBox bbox_raft_pattern = bbox_object;
+    if (config.raft_pattern.value != ipSupportBase) {
+        BoundingBox raft_extents;
+        for (const SupportGeneratorLayer *raft_layer : raft_layers)
+            raft_extents.merge(get_extents(raft_layer->polygons));
+        if (raft_extents.defined)
+            bbox_raft_pattern = raft_extents;
+    }
+
 //    const coordf_t link_max_length_factor = 3.;
     const coordf_t link_max_length_factor = 0.;
 
@@ -1509,7 +1524,7 @@ void generate_support_toolpaths(
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, n_raft_layers),
         [&support_layers, &raft_layers, &intermediate_layers, &config, &support_params, &slicing_params,
-            &bbox_object, link_max_length_factor]
+            &bbox_object, &bbox_raft_pattern, link_max_length_factor]
             (const tbb::blocked_range<size_t>& range) {
         for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++ support_layer_id)
         {
@@ -1519,9 +1534,9 @@ void generate_support_toolpaths(
             SupportGeneratorLayer      &raft_layer    = *raft_layers[support_layer_id];
 
             std::unique_ptr<Fill> filler_interface = std::unique_ptr<Fill>(Fill::new_from_type(support_params.raft_interface_fill_pattern));
-            std::unique_ptr<Fill> filler_support   = std::unique_ptr<Fill>(Fill::new_from_type(support_params.base_fill_pattern));
+            std::unique_ptr<Fill> filler_support   = std::unique_ptr<Fill>(Fill::new_from_type(support_params.raft_base_fill().pattern));
             filler_interface->set_bounding_box(bbox_object);
-            filler_support->set_bounding_box(bbox_object);
+            filler_support->set_bounding_box(bbox_raft_pattern);
 
             // Print the tree supports cutting through the raft with the exception of the 1st layer, where a full support layer will be printed below
             // both the raft and the trees.
@@ -1540,17 +1555,18 @@ void generate_support_toolpaths(
                 Flow flow(float(support_params.support_material_flow.width()), float(raft_layer.height), support_params.support_material_flow.nozzle_diameter());
                 assert(!raft_layer.bridging);
                 if (! to_infill_polygons.empty()) {
+                    const SupportParameters::RaftBaseFill fill = support_params.raft_base_fill();
                     Fill *filler = filler_support.get();
-                    filler->angle = support_params.raft_angle_base;
+                    filler->angle = fill.angle;
                     filler->spacing = support_params.support_material_flow.spacing();
-                    filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / support_params.support_density));
+                    filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / fill.density));
                     fill_expolygons_with_sheath_generate_paths(
                         // Destination
                         support_layer.support_fills.entities,
                         // Regions to fill
                         tree_polygons.empty() ? to_infill_polygons : diff(to_infill_polygons, tree_polygons),
                         // Filler and its parameters
-                        filler, float(support_params.support_density),
+                        filler, fill.density,
                         // Extrusion parameters
                         ExtrusionRole::erSupportMaterial, flow,
                         support_params, support_params.with_sheath, false);
