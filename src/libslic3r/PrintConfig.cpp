@@ -170,7 +170,11 @@ static t_config_enum_values s_keys_map_InfillPattern {
     { "concentric", ipConcentric },
     { "hilbertcurve", ipHilbertCurve },
     { "archimedeanchords", ipArchimedeanChords },
-    { "octagramspiral", ipOctagramSpiral }
+    { "octagramspiral", ipOctagramSpiral },
+    // Pattern of the sparse support/raft base layers. Historically nameless
+    // (chosen only implicitly by SupportParameters), the string is needed so
+    // `raft_pattern` can spell "as the supports do" as a real enum value.
+    { "supportbase", ipSupportBase }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InfillPattern)
 
@@ -4268,6 +4272,51 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("raft_pattern", coEnum);
+    def->label = L("Raft base pattern");
+    def->category = L("Support");
+    def->tooltip = L("Line pattern of the sparse middle raft layers. A space-filling curve such as Hilbert "
+                     "is compliant in-plane and equally so in every direction, so the shrinking object "
+                     "deforms the raft instead of peeling off the plate. Requires at least 4 raft layers: "
+                     "with fewer there are no middle layers and this setting has no effect.");
+    def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
+    def->enum_values.push_back("supportbase");
+    def->enum_values.push_back("rectilinear");
+    def->enum_values.push_back("hilbertcurve");
+    def->enum_values.push_back("honeycomb");
+    def->enum_values.push_back("concentric");
+    def->enum_labels.push_back(L("Same as supports"));
+    def->enum_labels.push_back(L("Rectilinear"));
+    def->enum_labels.push_back(L("Hilbert Curve"));
+    def->enum_labels.push_back(L("Honeycomb"));
+    def->enum_labels.push_back(L("Concentric"));
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipSupportBase));
+
+    def = this->add("raft_interface_layers", coInt);
+    def->label = L("Raft interface layers");
+    def->category = L("Support");
+    def->tooltip = L("How many of the topmost raft layers are printed dense, as the platform the object "
+                     "lands on. Zero keeps the historical split, where half of the raft layers are dense — "
+                     "which buries a compliant middle under a rigid crust. Ignored below 2 raft layers.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("raft_base_density", coPercent);
+    def->label = L("Raft base density");
+    def->category = L("Support");
+    def->tooltip = L("Density of the sparse middle raft layers. Zero inherits the support base density, "
+                     "which is what earlier versions always used. Lower density means larger loops and a "
+                     "more compliant raft.");
+    def->sidetext = "%";
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
 
     def = this->add("resolution", coFloat);
     def->label = L("Resolution");
