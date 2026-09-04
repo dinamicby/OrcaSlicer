@@ -4278,8 +4278,9 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Support");
     def->tooltip = L("Line pattern of the sparse middle raft layers. A space-filling curve such as Hilbert "
                      "is compliant in-plane and equally so in every direction, so the shrinking object "
-                     "deforms the raft instead of peeling off the plate. Requires at least 4 raft layers: "
-                     "with fewer there are no middle layers and this setting has no effect.");
+                     "deforms the raft instead of peeling off the plate. Middle layers = base layers - 1: "
+                     "with the default split that means at least 4 raft layers, with raft interface layers "
+                     "set at least that many plus 2; otherwise this setting has no effect.");
     def->enum_keys_map = &ConfigOptionEnum<InfillPattern>::get_enum_values();
     def->enum_values.push_back("supportbase");
     def->enum_values.push_back("rectilinear");
