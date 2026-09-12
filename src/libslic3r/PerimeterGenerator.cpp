@@ -151,7 +151,7 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
         const Polygon polygon = apply_fuzzy_skin(loop.polygon, perimeter_generator, loop.depth, loop.is_contour);
 
         ExtrusionPaths paths;
-        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > raft_and_underlay_layers(*perimeter_generator.object_config)) {
             // detect overhanging/bridging perimeters
 
             // get non 100% overhang paths by intersecting this loop with the grown lower slices
@@ -208,7 +208,7 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
             if(paths.empty()) continue;
             chain_and_reorder_extrusion_paths(paths, &paths.front().first_point());
         } else {
-            if (overhangs_reverse && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+            if (overhangs_reverse && perimeter_generator.layer_id > raft_and_underlay_layers(*perimeter_generator.object_config)) {
                 // Always reverse if detect overhang wall is not enabled
                 steep_overhang_contour = true;
                 steep_overhang_hole    = true;
@@ -375,7 +375,7 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
-        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+        if (perimeter_generator.config->detect_overhang_wall && perimeter_generator.layer_id > raft_and_underlay_layers(*perimeter_generator.object_config)) {
             ClipperLib_Z::Path extrusion_path;
             extrusion_path.reserve(extrusion->size());
             BoundingBox extrusion_path_bbox;
@@ -498,7 +498,7 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator& p
             }
         }
         else {
-            if (overhangs_reverse && perimeter_generator.layer_id > perimeter_generator.object_config->raft_layers) {
+            if (overhangs_reverse && perimeter_generator.layer_id > raft_and_underlay_layers(*perimeter_generator.object_config)) {
                 // Always reverse if detect overhang wall is not enabled
                 steep_overhang_contour = true;
                 steep_overhang_hole    = true;
@@ -1059,7 +1059,7 @@ std::tuple<std::vector<ExtrusionPaths>, Polygons> generate_extra_perimeters_over
 void PerimeterGenerator::apply_extra_perimeters(ExPolygons &infill_area)
 {
     if (!m_spiral_vase && this->lower_slices != nullptr && this->config->detect_overhang_wall && this->config->extra_perimeters_on_overhangs &&
-        this->config->wall_loops > 0 && this->layer_id > this->object_config->raft_layers) {
+        this->config->wall_loops > 0 && this->layer_id > raft_and_underlay_layers(*this->object_config)) {
         // Generate extra perimeters on overhang areas, and cut them to these parts only, to save print time and material
         auto [extra_perimeters, filled_area] = generate_extra_perimeters_over_overhangs(infill_area, this->lower_slices_polygons(),
                                                                                         this->config->wall_loops, this->overhang_flow,
@@ -1198,7 +1198,7 @@ void PerimeterGenerator::process_classic()
         int sparse_infill_density = this->config->sparse_infill_density.value;
         if (this->config->alternate_extra_wall && this->layer_id % 2 == 1 && !m_spiral_vase && sparse_infill_density > 0) // add alternating extra wall
             loop_number++;
-        if (this->layer_id == object_config->raft_layers && this->config->only_one_wall_first_layer)
+        if (this->layer_id == raft_and_underlay_layers(*object_config) && this->config->only_one_wall_first_layer)
             loop_number = 0;
         // Set the topmost layer to be one wall
         if (loop_number > 0 && config->only_one_wall_top && this->upper_slices == nullptr)
@@ -2115,7 +2115,7 @@ void PerimeterGenerator::process_arachne()
             loop_number++;
 
         // Set the bottommost layer to be one wall
-        const bool is_bottom_layer = (this->layer_id == object_config->raft_layers) ? true : false;
+        const bool is_bottom_layer = (this->layer_id == raft_and_underlay_layers(*object_config)) ? true : false;
         if (is_bottom_layer && this->config->only_one_wall_first_layer)
             loop_number = 0;
 

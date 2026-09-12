@@ -966,6 +966,19 @@ PRINT_CONFIG_CLASS_DEFINE(
 
 )
 
+// Number of layers printed below the object: the raft, plus the sparse underlay
+// carrying it. Object layer ids are offset by exactly this count
+// (`PrintObjectSlice.cpp`, `new_layers` seeds the id from
+// `SlicingParameters::raft_layers()`), so "is this the first object layer?" has
+// to be asked against this and not against `raft_layers` alone — comparing
+// against the raft count alone made the first object layer look like an
+// ordinary one and dereferenced its non-existent lower layer.
+inline int raft_and_underlay_layers(const PrintObjectConfig &config)
+{
+    return config.raft_layers.value > 0 ?
+        config.raft_layers.value + std::max(0, config.raft_underlay_layers.value) : 0;
+}
+
 // This object is mapped to Perl as Slic3r::Config::PrintRegion.
 PRINT_CONFIG_CLASS_DEFINE(
     PrintRegionConfig,
