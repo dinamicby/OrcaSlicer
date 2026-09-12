@@ -4319,6 +4319,42 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(0));
 
+    def = this->add("raft_underlay_layers", coInt);
+    def->label = L("Raft underlay layers");
+    def->category = L("Support");
+    def->tooltip = L("How many sparse layers are printed on the plate below the raft. Each one is a "
+                     "grid of straight lines rotated 90 degrees against the layer below it, printed at "
+                     "the first layer height. The raft flange then lands on that grid instead of on the "
+                     "plate, so the object touches the adhesive over a fraction of its footprint. Zero "
+                     "is the historical raft, straight on the plate. Ignored without a raft.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("raft_underlay_density", coPercent);
+    def->label = L("Raft underlay density");
+    def->category = L("Support");
+    def->tooltip = L("Density of the sparse underlay layers below the raft. This is what decides how "
+                     "much of the plate the print actually touches.");
+    def->sidetext = "%";
+    def->min = 1;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(50));
+
+    def = this->add("raft_underlay_line_width", coFloat);
+    def->label = L("Raft underlay line width");
+    def->category = L("Support");
+    def->tooltip = L("Extrusion width of the underlay lines. Zero means 1.5 times the nozzle diameter: "
+                     "a fat line grips the plate better and keeps the sparse grid from curling.");
+    def->sidetext = "mm";	// milimeters, don't need translation
+    def->min = 0;
+    def->max = 10;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("resolution", coFloat);
     def->label = L("Resolution");
     def->tooltip = L("The G-code path is generated after simplifying the contour of models to avoid too many points and G-code lines. "

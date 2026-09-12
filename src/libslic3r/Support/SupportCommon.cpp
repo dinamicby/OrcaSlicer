@@ -355,7 +355,9 @@ SupportGeneratorLayersPtr generate_raft_base(
     }
 
     // How much to inflate the support columns to be stable. This also applies to the 1st layer, if no raft layers are to be printed.
-    const float inflate_factor_fine      = float(scale_((slicing_params.raft_layers() > 1) ? 0.5 : EPSILON));
+    // Counted over the raft proper: a sparse underlay below it lifts the raft but
+    // does not change how wide the raft itself is drawn.
+    const float inflate_factor_fine      = float(scale_((slicing_params.classic_raft_layers() > 1) ? 0.5 : EPSILON));
     const float inflate_factor_1st_layer = std::max(0.f, float(scale_(object.config().raft_first_layer_expansion)) - inflate_factor_fine);
     SupportGeneratorLayer       *contacts         = top_contacts         .empty() ? nullptr : top_contacts         .front();
     SupportGeneratorLayer       *interfaces       = interface_layers     .empty() ? nullptr : interface_layers     .front();
@@ -385,7 +387,14 @@ SupportGeneratorLayersPtr generate_raft_base(
     // Output vector.
     SupportGeneratorLayersPtr raft_layers;
 
-    if (slicing_params.raft_layers() > 1) {
+    // Footprint of the sparse underlay, filled in by whichever branch below knows
+    // the outline of the lowest raft layer. The underlay repeats that outline, so
+    // both raft expansions (`raft_expansion`, already folded into the contact
+    // polygons, and `raft_first_layer_expansion` applied here) reach the plate and
+    // the underlay is never narrower than the raft standing on it.
+    Polygons underlay_footprint;
+
+    if (slicing_params.classic_raft_layers() > 1) {
         Polygons base;
         Polygons columns;
         Polygons first_layer;
@@ -408,15 +417,17 @@ SupportGeneratorLayersPtr generate_raft_base(
             base = union_(base, interface_polygons);
         }
         // Do not add the raft contact layer, only add the raft layers below the contact layer.
-        // Insert the 1st layer.
+        // Insert the 1st layer. With an underlay below, the flange lands on it
+        // rather than on the plate: `raft_underlay_top_z` is zero without one.
         {
             SupportGeneratorLayer &new_layer = layer_storage.allocate(slicing_params.base_raft_layers > 0 ? SupporLayerType::RaftBase : SupporLayerType::RaftInterface);
             raft_layers.push_back(&new_layer);
-            new_layer.print_z = slicing_params.first_print_layer_height;
+            new_layer.bottom_z = slicing_params.raft_underlay_top_z;
+            new_layer.print_z = new_layer.bottom_z + slicing_params.first_print_layer_height;
             new_layer.height  = slicing_params.first_print_layer_height;
-            new_layer.bottom_z = 0.;
             first_layer = union_(std::move(first_layer), base);
             new_layer.polygons = inflate_factor_1st_layer > 0 ? expand(first_layer, inflate_factor_1st_layer) : first_layer;
+            underlay_footprint = new_layer.polygons;
         }
         // Insert the base layers.
         for (size_t i = 1; i < slicing_params.base_raft_layers; ++ i) {
@@ -441,6 +452,11 @@ SupportGeneratorLayersPtr generate_raft_base(
             new_layer.contact_polygons = std::make_unique<Polygons>(columns);
         }
     } else {
+        // A single-layer raft is just the contact layer, generated elsewhere; an
+        // underlay below it repeats that layer's outline.
+        if (contacts != nullptr && ! contacts->polygons.empty())
+            underlay_footprint = inflate_factor_1st_layer > 0 ?
+                expand(contacts->polygons, inflate_factor_1st_layer) : contacts->polygons;
         if (columns_base != nullptr) {
             // Expand the bases of the support columns in the 1st layer.
             Polygons &raft     = columns_base->polygons;
@@ -472,6 +488,27 @@ SupportGeneratorLayersPtr generate_raft_base(
             if (base_interfaces)
                 base_interfaces->polygons = diff(base_interfaces->polygons, brim);
         }
+    }
+
+    // Slice the underlay footprint into layers below everything produced above.
+    // They come first in the vector, which is what `generate_support_toolpaths`
+    // counts on to tell an underlay layer from a raft layer.
+    if (slicing_params.underlay_raft_layers > 0 && ! underlay_footprint.empty()) {
+        SupportGeneratorLayersPtr underlay_layers;
+        underlay_layers.reserve(slicing_params.underlay_raft_layers);
+        coordf_t print_z = 0.;
+        for (size_t i = 0; i < slicing_params.underlay_raft_layers; ++ i) {
+            SupportGeneratorLayer &new_layer = i == 0 ?
+                layer_storage.allocate(SupporLayerType::RaftBase) :
+                layer_storage.allocate_unguarded(SupporLayerType::RaftBase);
+            underlay_layers.push_back(&new_layer);
+            new_layer.bottom_z = print_z;
+            print_z += slicing_params.underlay_raft_layer_height;
+            new_layer.print_z  = print_z;
+            new_layer.height   = slicing_params.underlay_raft_layer_height;
+            new_layer.polygons = underlay_footprint;
+        }
+        raft_layers.insert(raft_layers.begin(), underlay_layers.begin(), underlay_layers.end());
     }
 
     return raft_layers;
@@ -1535,8 +1572,40 @@ void generate_support_toolpaths(
 
             std::unique_ptr<Fill> filler_interface = std::unique_ptr<Fill>(Fill::new_from_type(support_params.raft_interface_fill_pattern));
             std::unique_ptr<Fill> filler_support   = std::unique_ptr<Fill>(Fill::new_from_type(support_params.raft_base_fill().pattern));
+            // The underlay is straight lines by definition — it is a grid meant to
+            // touch the plate in as few places as possible, not a pattern choice.
+            std::unique_ptr<Fill> filler_underlay  = std::unique_ptr<Fill>(Fill::new_from_type(ipRectilinear));
             filler_interface->set_bounding_box(bbox_object);
             filler_support->set_bounding_box(bbox_raft_pattern);
+            // Same alignment reference as the raft's own rectilinear fills: for a
+            // straight pattern the box is only the origin the lines are aligned to.
+            filler_underlay->set_bounding_box(bbox_object);
+
+            // Layers below the raft flange are the sparse underlay. They carry no
+            // sheath and no interface: bare crossing lines on the plate.
+            const size_t underlay_layers = slicing_params.underlay_raft_layers;
+            if (support_layer_id < underlay_layers) {
+                Fill *filler   = filler_underlay.get();
+                filler->angle  = support_params.raft_underlay_angle(support_layer_id);
+                filler->spacing = support_params.raft_underlay_flow.spacing();
+                const float density = float(support_params.raft_underlay_density);
+                filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
+                const Flow flow(float(support_params.raft_underlay_flow.width()), float(raft_layer.height),
+                                support_params.raft_underlay_flow.nozzle_diameter());
+                fill_expolygons_with_sheath_generate_paths(
+                    // Destination
+                    support_layer.support_fills.entities,
+                    // Regions to fill
+                    raft_layer.polygons,
+                    // Filler and its parameters
+                    filler, density,
+                    // Extrusion parameters
+                    ExtrusionRole::erSupportMaterial, flow,
+                    support_params, false, false);
+                continue;
+            }
+            // Index of this layer within the raft proper, the flange being 0.
+            const size_t raft_id = support_layer_id - underlay_layers;
 
             // Print the tree supports cutting through the raft with the exception of the 1st layer, where a full support layer will be printed below
             // both the raft and the trees.
@@ -1546,8 +1615,8 @@ void generate_support_toolpaths(
                 intermediate_layers[support_layer_id]->polygons : Polygons();
 
             // Print the support base below the support columns, or the support base for the support columns plus the contacts.
-            if (support_layer_id > 0) {
-                const Polygons &to_infill_polygons = (support_layer_id < slicing_params.base_raft_layers) ?
+            if (raft_id > 0) {
+                const Polygons &to_infill_polygons = (raft_id < slicing_params.base_raft_layers) ?
                     raft_layer.polygons :
                     //FIXME misusing contact_polygons for support columns.
                     ((raft_layer.contact_polygons == nullptr) ? Polygons() : *raft_layer.contact_polygons);
@@ -1578,12 +1647,12 @@ void generate_support_toolpaths(
             Fill *filler = filler_interface.get();
             Flow  flow = support_params.first_layer_flow;
             float density = 0.f;
-            if (support_layer_id == 0) {
+            if (raft_id == 0) {
                 // Base flange.
                 filler->angle = support_params.raft_angle_1st_layer;
                 filler->spacing = support_params.first_layer_flow.spacing();
                 density       = float(config.raft_first_layer_density.value * 0.01);
-            } else if (support_layer_id >= slicing_params.base_raft_layers) {
+            } else if (raft_id >= slicing_params.base_raft_layers) {
                 filler->angle = support_params.raft_interface_angle(support_layer.interface_id());
                 // We don't use $base_flow->spacing because we need a constant spacing
                 // value that guarantees that all layers are correctly aligned.
@@ -1602,9 +1671,9 @@ void generate_support_toolpaths(
                 // Filler and its parameters
                 filler, density,
                 // Extrusion parameters
-                (support_layer_id < slicing_params.base_raft_layers) ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, flow,
-                // sheath at first layer
-                support_params, support_layer_id == 0, support_layer_id == 0);
+                (raft_id < slicing_params.base_raft_layers) ? ExtrusionRole::erSupportMaterial : ExtrusionRole::erSupportMaterialInterface, flow,
+                // sheath at the flange
+                support_params, raft_id == 0, raft_id == 0);
         }
     });
 

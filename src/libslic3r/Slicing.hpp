@@ -39,7 +39,12 @@ struct SlicingParameters
 
     // Has any raft layers?
     bool        has_raft() const { return raft_layers() > 0; }
-    size_t      raft_layers() const { return base_raft_layers + interface_raft_layers; }
+    // Every layer printed below the object: the sparse underlay, then the raft itself.
+    size_t      raft_layers() const { return underlay_raft_layers + classic_raft_layers(); }
+    // The raft proper — flange, base and interface layers — without the underlay below it.
+    // Layer-type arithmetic inside the raft (which layer is the flange, where the
+    // interface starts) counts in these, not in raft_layers().
+    size_t      classic_raft_layers() const { return base_raft_layers + interface_raft_layers; }
 
     // Is the 1st object layer height fixed, or could it be varied?
     bool        first_object_layer_height_fixed()  const { return ! has_raft() || first_object_layer_bridging; }
@@ -53,12 +58,17 @@ struct SlicingParameters
 
     bool        valid { false };
 
+    // Number of sparse underlay layers below the raft flange. Zero is the
+    // historical raft, sitting on the plate directly.
+    size_t      underlay_raft_layers { 0 };
     // Number of raft layers.
     size_t      base_raft_layers { 0 };
     // Number of interface layers including the contact layer.
     size_t      interface_raft_layers { 0 };
 
     // Layer heights of the raft (base, interface and a contact layer).
+    // The underlay prints at the first layer height, whatever the raft does.
+    coordf_t    underlay_raft_layer_height { 0 };
     coordf_t    base_raft_layer_height { 0 };
     coordf_t    interface_raft_layer_height { 0 };
     coordf_t    contact_raft_layer_height { 0 };
@@ -97,6 +107,8 @@ struct SlicingParameters
     // Bottom and top of the printed object.
     // If printed without a raft, object_print_z_min = 0 and object_print_z_max = object height.
     // Otherwise object_print_z_min is equal to the raft height.
+    // Top of the sparse underlay, i.e. where the raft flange starts. Zero without an underlay.
+    coordf_t    raft_underlay_top_z { 0 };
     coordf_t    raft_base_top_z { 0 };
     coordf_t    raft_interface_top_z { 0 };
     coordf_t    raft_contact_top_z { 0 };
@@ -118,7 +130,10 @@ inline bool equal_layering(const SlicingParameters &sp1, const SlicingParameters
 {
     assert(sp1.valid);
     assert(sp2.valid);
-    return  sp1.base_raft_layers                    == sp2.base_raft_layers                     &&
+    return  sp1.underlay_raft_layers                == sp2.underlay_raft_layers                 &&
+            sp1.underlay_raft_layer_height          == sp2.underlay_raft_layer_height           &&
+            sp1.raft_underlay_top_z                 == sp2.raft_underlay_top_z                  &&
+            sp1.base_raft_layers                    == sp2.base_raft_layers                     &&
             sp1.interface_raft_layers               == sp2.interface_raft_layers                &&
             sp1.base_raft_layer_height              == sp2.base_raft_layer_height               &&
             sp1.interface_raft_layer_height         == sp2.interface_raft_layer_height          &&

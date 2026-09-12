@@ -47,6 +47,19 @@ struct SupportParameters {
         this->support_material_flow = Slic3r::support_material_flow(&object, float(slicing_params.layer_height));
         this->support_material_interface_flow = Slic3r::support_material_interface_flow(&object, float(slicing_params.layer_height));
     	this->raft_interface_flow                = support_material_interface_flow;
+        // The sparse underlay below the raft gets its own width: it is the layer
+        // that grips the plate, and a line fatter than the raft's own grips better.
+        // Zero means 1.5 nozzle diameters. Height is the first layer height —
+        // every underlay layer is printed at it.
+        {
+            // Same convention as Slicing.cpp: support_filament == 0 means "current
+            // nozzle", and get_at(size_t(-1)) hands back the 0th diameter.
+            const coordf_t underlay_nozzle_dmr = print_config.nozzle_diameter.get_at(object_config.support_filament.value - 1);
+            const coordf_t underlay_width      = object_config.raft_underlay_line_width.value > 0 ?
+                object_config.raft_underlay_line_width.value : 1.5 * underlay_nozzle_dmr;
+            this->raft_underlay_flow    = Flow(float(underlay_width), float(slicing_params.first_print_layer_height), float(underlay_nozzle_dmr));
+            this->raft_underlay_density = std::min(1., 0.01 * object_config.raft_underlay_density.value);
+        }
 
         this->ironing = object_config.support_ironing;
         this->ironing_flow = support_material_interface_flow.with_height(support_material_interface_flow.height() * 0.01 * object_config.support_ironing_flow.value);
@@ -139,7 +152,7 @@ struct SupportParameters {
         this->raft_angle_base       = 0.f;
         this->raft_angle_interface  = 0.f;
         if (slicing_params.base_raft_layers > 1) {
-            assert(slicing_params.raft_layers() >= 4);
+            assert(slicing_params.classic_raft_layers() >= 4);
             // There are all raft layer types (1st layer, base, interface & contact layers) available.
             this->raft_angle_1st_layer  = this->interface_angle;
             this->raft_angle_base       = this->base_angle;
@@ -148,7 +161,7 @@ struct SupportParameters {
                 // Allign the 1st raft interface layer so that the object 1st layer is hatched perpendicularly to the raft contact interface.
                 this->raft_angle_interface += float(0.5 * M_PI);
         } else if (slicing_params.base_raft_layers == 1 || slicing_params.interface_raft_layers > 1) {
-            assert(slicing_params.raft_layers() == 2 || slicing_params.raft_layers() == 3);
+            assert(slicing_params.classic_raft_layers() == 2 || slicing_params.classic_raft_layers() == 3);
             // 1st layer, interface & contact layers available.
             this->raft_angle_1st_layer  = this->base_angle;
             this->raft_angle_interface  = this->interface_angle + 0.5 * M_PI;
@@ -156,14 +169,14 @@ struct SupportParameters {
             // Only the contact raft layer is non-empty, which will be printed as the 1st layer.
             assert(slicing_params.base_raft_layers == 0);
             assert(slicing_params.interface_raft_layers == 1);
-            assert(slicing_params.raft_layers() == 1);
+            assert(slicing_params.classic_raft_layers() == 1);
             this->raft_angle_1st_layer = float(0.5 * M_PI);
             this->raft_angle_interface = this->raft_angle_1st_layer;
         } else {
             // No raft.
             assert(slicing_params.base_raft_layers == 0);
             assert(slicing_params.interface_raft_layers == 0);
-            assert(slicing_params.raft_layers() == 0);
+            assert(slicing_params.classic_raft_layers() == 0);
         }
 
 	    const auto     nozzle_diameter = print_config.nozzle_diameter.get_at(object_config.support_interface_filament - 1);
@@ -229,6 +242,8 @@ struct SupportParameters {
 	Flow 					support_material_bottom_interface_flow;
 	// Flow at raft inteface & contact layers.
 	Flow    				raft_interface_flow;
+	// Flow of the sparse underlay layers below the raft flange.
+	Flow                    raft_underlay_flow;
     coordf_t support_extrusion_width;
 	// Is merging of regions allowed? Could the interface & base support regions be printed with the same extruder?
 	bool 					can_merge_support_regions;
@@ -247,6 +262,8 @@ struct SupportParameters {
     coordf_t 				interface_density;
     // Density of the raft interface and contact layers.
     coordf_t 				raft_interface_density;
+    // Density of the sparse underlay layers below the raft flange.
+    coordf_t                raft_underlay_density;
     coordf_t 				support_spacing;
     // Density of the base support layers.
     coordf_t 				support_density;
@@ -273,6 +290,12 @@ struct SupportParameters {
     float 					raft_angle_1st_layer;
     float 					raft_angle_base;
     float 					raft_angle_interface;
+
+    // Angle of the underlay layer with the given index, 0 being the layer on the
+    // plate. Neighbouring layers cross at a right angle, so the sparse grid is
+    // equally stiff both ways and each layer has something to bridge onto.
+    float                   raft_underlay_angle(size_t underlay_id) const
+        { return (underlay_id & 1) ? this->base_angle : this->interface_angle; }
 
     // Produce a raft interface angle for a given SupportLayer::interface_id()
     float 					raft_interface_angle(size_t interface_id) const 

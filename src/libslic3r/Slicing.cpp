@@ -128,6 +128,16 @@ SlicingParameters SlicingParameters::create_from_config(
     }
 
     if (params.base_raft_layers > 0) {
+        // Sparse underlay below the raft: N layers of straight lines laid on the
+        // plate, with the raft flange landing on them instead of on the plate.
+        // Every underlay layer is printed at the first layer height — it is the
+        // layer touching the plate, and that is the height the machine is trimmed
+        // for. Only a raft can have an underlay: without one there is nothing to
+        // lift, and `raft_underlay_layers` is ignored (see the enclosing branch).
+        params.underlay_raft_layers       = size_t(std::max(0, object_config.raft_underlay_layers.value));
+        params.underlay_raft_layer_height = initial_layer_print_height;
+        params.raft_underlay_top_z        = coordf_t(params.underlay_raft_layers) * params.underlay_raft_layer_height;
+
         // `raft_interface_layers` overrides the historical half-and-half split.
         // Clamped to leave at least one layer on each side: the branch below
         // asserts both counts are non-zero. A raft of a single layer has no
@@ -151,15 +161,18 @@ SlicingParameters SlicingParameters::create_from_config(
     if (params.has_raft()) {
         // Raise first object layer Z by the thickness of the raft itself plus the extra distance required by the support material logic.
         //FIXME The last raft layer is the contact layer, which shall be printed with a bridging flow for ease of separation. Currently it is not the case.
-		if (params.raft_layers() == 1) {
+        // The raft flange sits on top of the underlay; without an underlay
+        // `raft_underlay_top_z` is zero and this is the first printed layer, as before.
+        const coordf_t raft_flange_top_z = params.raft_underlay_top_z + initial_layer_print_height;
+		if (params.classic_raft_layers() == 1) {
             // There is only the contact layer.
             params.contact_raft_layer_height = initial_layer_print_height;
-            params.raft_contact_top_z        = initial_layer_print_height;
+            params.raft_contact_top_z        = raft_flange_top_z;
 		} else {
             assert(params.base_raft_layers > 0);
             assert(params.interface_raft_layers > 0);
             // Number of the base raft layers is decreased by the first layer.
-            params.raft_base_top_z       = initial_layer_print_height + coordf_t(params.base_raft_layers - 1) * params.base_raft_layer_height;
+            params.raft_base_top_z       = raft_flange_top_z + coordf_t(params.base_raft_layers - 1) * params.base_raft_layer_height;
             // Number of the interface raft layers is decreased by the contact layer.
             params.raft_interface_top_z  = params.raft_base_top_z + coordf_t(params.interface_raft_layers - 1) * params.interface_raft_layer_height;
 			params.raft_contact_top_z    = params.raft_interface_top_z + params.contact_raft_layer_height;

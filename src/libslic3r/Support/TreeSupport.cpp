@@ -609,7 +609,8 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     : m_object(&object), m_slicing_params(slicing_params), m_support_params(object), m_object_config(&object.config())
 {
     m_print_config = &m_object->print()->config();
-    m_raft_layers = slicing_params.base_raft_layers + slicing_params.interface_raft_layers;
+    // Every layer below the object: the sparse underlay plus the raft proper.
+    m_raft_layers = slicing_params.raft_layers();
     support_type = m_object_config->support_type;
 
     SupportMaterialPattern support_pattern  = m_object_config->support_base_pattern;
@@ -1133,6 +1134,14 @@ void TreeSupport::create_tree_support_layers()
     if (m_raft_layers > 0) { //create raft layers
         coordf_t raft_print_z = 0.f;
         coordf_t raft_slice_z = 0.f;
+        // Sparse underlay below the raft: printed at the first layer height, the
+        // raft flange lands on top of it.
+        for (size_t i = 0; i < m_slicing_params.underlay_raft_layers; i++) {
+            coordf_t height = m_slicing_params.underlay_raft_layer_height;
+            raft_print_z += height;
+            raft_slice_z = raft_print_z - height / 2;
+            m_object->add_tree_support_layer(layer_id++, height, raft_print_z, raft_slice_z);
+        }
         {
             // Do not add the raft contact layer, 1st layer should use first_print_layer_height
             coordf_t height = m_slicing_params.first_print_layer_height;
@@ -1361,24 +1370,51 @@ void TreeSupport::generate_toolpaths()
 
     raft_areas = std::move(offset_ex(raft_areas, scale_(object_config.raft_first_layer_expansion)));
 
-    size_t layer_nr = 0;
-    for (; layer_nr < m_slicing_params.base_raft_layers; layer_nr++) {
+    // Sparse underlay below the raft: straight lines crossing at a right angle
+    // from layer to layer, at the width and density the underlay knobs ask for.
+    // No wall — the point of the underlay is to touch the plate in as few places
+    // as possible. Its outline is the flange's, so both raft expansions reach it.
+    const size_t underlay_layers = m_slicing_params.underlay_raft_layers;
+    {
+        auto underlay_areas = offset_ex(raft_areas, scale_(object_config.raft_first_layer_expansion.value));
+        const coordf_t underlay_width = object_config.raft_underlay_line_width.value > 0 ?
+            object_config.raft_underlay_line_width.value : 1.5 * nozzle_diameter;
+        for (size_t underlay_id = 0; underlay_id < underlay_layers; underlay_id++) {
+            SupportLayer *ts_layer = m_object->get_support_layer(underlay_id);
+            Flow underlay_flow = Flow(float(underlay_width), ts_layer->height, nozzle_diameter);
+            Fill *filler_underlay = Fill::new_from_type(ipRectilinear);
+            filler_underlay->angle = Geometry::deg2rad(float(object_config.support_angle.value + ((underlay_id & 1) ? 0. : 90.)));
+            filler_underlay->spacing = underlay_flow.spacing();
+
+            FillParams fill_params;
+            fill_params.density = float(std::min(1., 0.01 * object_config.raft_underlay_density.value));
+            fill_params.dont_adjust = true;
+            fill_expolygons_generate_paths(ts_layer->support_fills.entities, underlay_areas,
+                filler_underlay, fill_params, erSupportMaterial, underlay_flow);
+            delete filler_underlay;
+        }
+    }
+
+    size_t layer_nr = underlay_layers;
+    for (; layer_nr < underlay_layers + m_slicing_params.base_raft_layers; layer_nr++) {
+        // Index within the raft proper, the flange being 0.
+        const size_t raft_id = layer_nr - underlay_layers;
         SupportLayer *ts_layer = m_object->get_support_layer(layer_nr);
-        coordf_t expand_offset = (layer_nr == 0 ? m_object_config->raft_first_layer_expansion.value : 0.);
+        coordf_t expand_offset = (raft_id == 0 ? m_object_config->raft_first_layer_expansion.value : 0.);
         auto raft_areas1 = offset_ex(raft_areas, scale_(expand_offset));
 
         Flow support_flow = Flow(support_extrusion_width, ts_layer->height, nozzle_diameter);
         Fill* filler_raft = Fill::new_from_type(ipRectilinear);
-        filler_raft->angle = layer_nr == 0 ? PI/2 : 0;
+        filler_raft->angle = raft_id == 0 ? PI/2 : 0;
         filler_raft->spacing = support_flow.spacing();
 
         FillParams fill_params;
         coordf_t raft_density = std::min(1., support_flow.spacing() / (object_config.support_base_pattern_spacing.value + support_flow.spacing()));
-        fill_params.density = layer_nr == 0 ? object_config.raft_first_layer_density * 0.01 : raft_density;
+        fill_params.density = raft_id == 0 ? object_config.raft_first_layer_density * 0.01 : raft_density;
         fill_params.dont_adjust = true;
 
         // wall of first layer raft
-        if (layer_nr == 0) {
+        if (raft_id == 0) {
             Flow flow = Flow(support_extrusion_width, ts_layer->height, nozzle_diameter);
             extrusion_entities_append_loops(ts_layer->support_fills.entities, to_polygons(raft_areas1), erSupportMaterial,
                         float(flow.mm3_per_mm()), float(flow.width()), float(flow.height()));
@@ -1403,8 +1439,8 @@ void TreeSupport::generate_toolpaths()
 
 
     // raft interfaces
-    for (layer_nr = m_slicing_params.base_raft_layers;
-         layer_nr < m_slicing_params.base_raft_layers + m_slicing_params.interface_raft_layers;
+    for (layer_nr = underlay_layers + m_slicing_params.base_raft_layers;
+         layer_nr < underlay_layers + m_slicing_params.classic_raft_layers();
          layer_nr++)
     {
         SupportLayer *ts_layer = m_object->get_support_layer(layer_nr);

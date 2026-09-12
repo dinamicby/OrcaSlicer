@@ -323,8 +323,14 @@ public:
     
         if (slicing_params.raft_layers() > 0) {
             // Fill in raft_layers with the heights of the layers below the first object layer.
-            // First layer
-            double z = slicing_params.first_print_layer_height;
+            // Sparse underlay, if any: the layers the raft flange stands on.
+            double z = 0;
+            for (size_t i = 0; i < slicing_params.underlay_raft_layers; ++ i) {
+                z += slicing_params.underlay_raft_layer_height;
+                this->raft_layers.emplace_back(z);
+            }
+            // First layer of the raft proper — on the plate, or on the underlay.
+            z = slicing_params.raft_underlay_top_z + slicing_params.first_print_layer_height;
             this->raft_layers.emplace_back(z);
             // Raft base layers
             for (size_t i = 1; i < slicing_params.base_raft_layers; ++ i) {
@@ -337,7 +343,7 @@ public:
                 this->raft_layers.emplace_back(z);
             }
             // Raft contact layer
-            if (slicing_params.raft_layers() > 1) {
+            if (slicing_params.classic_raft_layers() > 1) {
                 z = slicing_params.raft_contact_top_z;
                 this->raft_layers.emplace_back(z);
             }
