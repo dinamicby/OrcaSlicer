@@ -892,6 +892,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_ironing))
     ((ConfigOptionEnum<InfillPattern>, support_ironing_pattern))
     ((ConfigOptionPercent,             support_ironing_flow))
+    ((ConfigOptionFloat,               support_flow_ratio))
+    ((ConfigOptionFloat,               support_interface_flow_ratio))
     ((ConfigOptionFloat,               support_ironing_spacing))
     ((ConfigOptionFloat,               xy_hole_compensation))
     ((ConfigOptionFloat,               xy_contour_compensation))
