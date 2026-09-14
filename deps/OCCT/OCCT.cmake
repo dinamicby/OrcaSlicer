@@ -27,7 +27,14 @@ orcaslicer_add_cmake_project(OCCT
         #-DBUILD_MODULE_DataExchange=OFF
         -DBUILD_MODULE_Draw=OFF
         -DBUILD_MODULE_FoundationClasses=OFF
-        -DBUILD_MODULE_ModelingAlgorithms=OFF
+        # Protype: ON, not OFF. Reading STEP needs none of this module, so
+        # upstream leaves it out - but our FFI bridge calls BRepFilletAPI
+        # (fillets/chamfers) and BRepOffsetAPI, whose toolkits TKFillet and
+        # TKOffset only get built when the module is on. With it off the
+        # Windows deps prefix ships 30 TK libs and no BRepFilletAPI headers,
+        # and the daemon dies at compile time:
+        #   fatal error C1083: cannot open include file BRepFilletAPI_MakeFillet.hxx
+        -DBUILD_MODULE_ModelingAlgorithms=ON
         -DBUILD_MODULE_ModelingData=OFF
         -DBUILD_MODULE_Visualization=OFF
 )
