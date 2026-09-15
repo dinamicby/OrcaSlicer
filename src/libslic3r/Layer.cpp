@@ -28,6 +28,15 @@ bool Layer::empty() const
     return true;
 }
 
+// Protype: lslices with the solid that hole_to_polyhole cut away put back, i.e. the layer as the mesh sliced it.
+// See Layer::lslices_polyhole_excess for why support overhang detection wants this and nothing else does.
+ExPolygons Layer::lslices_before_polyholes() const
+{
+    if (this->lslices_polyhole_excess.empty())
+        return this->lslices;
+    return union_ex(this->lslices, this->lslices_polyhole_excess);
+}
+
 LayerRegion* Layer::add_region(const PrintRegion *print_region)
 {
     m_regions.emplace_back(new LayerRegion(this, print_region));

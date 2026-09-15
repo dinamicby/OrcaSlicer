@@ -767,6 +767,13 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     m_highest_overhang_layer = 0;
 
     // calc the extrudable expolygons of each layer
+    // Protype: and, for layers whose holes hole_to_polyhole enlarged, the same thing on the mesh outline
+    // (Layer::lslices_polyhole_excess). A layer is asked TWO different questions: what does it print
+    // (lslices_extrudable, the polyholes, used for collisions and for the overhang of the layer itself) and
+    // what does it hold up (this one). Answering the second with the polyholes turns their corners, and with
+    // twisted polyholes the slivers between rotated neighbours, into overhangs that no painted blocker can
+    // ever cover, because blockers only project down facing mesh facets and a bore wall is vertical.
+    std::vector<ExPolygons> supporting_outline(m_object->layer_count());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, m_object->layer_count()),
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_nr = range.begin(); layer_nr < range.end(); layer_nr++) {
@@ -775,9 +782,17 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 Layer* layer = m_object->get_layer(layer_nr);
                 // Filter out areas whose diameter that is smaller than extrusion_width, but we don't want to lose any details.
                 layer->lslices_extrudable = intersection_ex(layer->lslices, offset2_ex(layer->lslices, -extrusion_width_scaled / 2, extrusion_width_scaled));
+                if (!layer->lslices_polyhole_excess.empty()) {
+                    ExPolygons unenlarged = layer->lslices_before_polyholes();
+                    supporting_outline[layer_nr] = intersection_ex(unenlarged, offset2_ex(unenlarged, -extrusion_width_scaled / 2, extrusion_width_scaled));
+                }
                 layer->loverhangs.clear();
             }
         });
+    // What the layer below offers as support: the mesh outline where polyholes changed it, the printed one elsewhere.
+    auto supporting_polys = [&supporting_outline, this](size_t layer_nr) -> const ExPolygons& {
+        return supporting_outline[layer_nr].empty() ? m_object->get_layer(layer_nr)->lslices_extrudable : supporting_outline[layer_nr];
+    };
 
     typedef std::chrono::high_resolution_clock clock_;
     typedef std::chrono::duration<double, std::ratio<1> > second_;
@@ -812,7 +827,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 //lower_layer_offset = std::min(lower_layer_offset, extrusion_width);
                 coordf_t support_offset_scaled = scale_(lower_layer_offset);
                 ExPolygons& curr_polys = layer->lslices_extrudable;
-                ExPolygons& lower_polys = lower_layer->lslices_extrudable;
+                const ExPolygons& lower_polys = supporting_polys(layer_nr - 1);
 
                 // normal overhang
                 ExPolygons lower_layer_offseted = offset_ex(lower_polys, support_offset_scaled, SUPPORT_SURFACES_OFFSET_PARAMETERS);
@@ -1034,7 +1049,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         if (lower_layer == nullptr)
             sharp_tail_overhangs = layer->sharp_tails;
         else {
-            ExPolygons lower_layer_expanded = offset_ex(lower_layer->lslices_extrudable, SCALED_RESOLUTION);
+            ExPolygons lower_layer_expanded = offset_ex(supporting_polys(layer_nr - 1), SCALED_RESOLUTION);
             for (size_t i = 0; i < layer->sharp_tails_height.size();i++) {
                 ExPolygons areas = diff_clipped({ layer->sharp_tails[i]}, lower_layer_expanded);
                 float accum_height = layer->sharp_tails_height[i];
@@ -1071,10 +1086,10 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 		int nDetected = layer->loverhangs.size();
         // enforcers now follow same logic as normal support. See STUDIO-3692
         if (layer_nr < enforcers.size() && lower_layer) {
-            ExPolygons enforced_overhangs   = intersection_ex(diff_ex(layer->lslices_extrudable, lower_layer->lslices_extrudable), enforcers[layer_nr]);
+            ExPolygons enforced_overhangs   = intersection_ex(diff_ex(layer->lslices_extrudable, supporting_polys(layer_nr - 1)), enforcers[layer_nr]);
             if (!enforced_overhangs.empty()) {
                 // FIXME this is a hack to make enforcers work on steep overhangs. See STUDIO-7538.
-                enforced_overhangs = diff_ex(offset_ex(enforced_overhangs, enforcer_overhang_offset), lower_layer->lslices_extrudable);
+                enforced_overhangs = diff_ex(offset_ex(enforced_overhangs, enforcer_overhang_offset), supporting_polys(layer_nr - 1));
                 append(layer->loverhangs, enforced_overhangs);
             }
         }

@@ -152,6 +152,16 @@ public:
     ExPolygons 				 lslices;
     ExPolygons 				 lslices_extrudable;  // BBS: the extrudable part of lslices used for tree support
     std::vector<BoundingBox> lslices_bboxes;
+    // Protype: solid that hole_to_polyhole cut away from lslices when it replaced a round hole by a polygon
+    // (the polyhole minus the sliced hole, clipped to the island it belongs to). Empty unless that transform
+    // actually replaced a hole of this layer. Support overhang detection adds it back before asking what the
+    // layer below holds up, so that neither the polygon's corners nor - with twisted polyholes - the slivers
+    // between rotated neighbours are taken for overhangs: they are not mesh geometry, so a painted support
+    // blocker (a projection of down facing mesh facets) can never cover them. Collision, trimming and every
+    // toolpath keep reading lslices, which is what actually gets printed.
+    ExPolygons               lslices_polyhole_excess;
+    // lslices as they came out of the mesh, before hole_to_polyhole enlarged the holes.
+    ExPolygons               lslices_before_polyholes() const;
 
     // BBS
     ExPolygons              loverhangs;
