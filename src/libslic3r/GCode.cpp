@@ -3848,6 +3848,7 @@ LayerResult GCode::process_layer(
     gcode += this->change_layer(print_z);  // this will increase m_layer_index
     m_layer = &layer;
     m_object_layer_over_raft = false;
+    m_fan_paint_zones = nullptr;
     if(is_BBL_Printer()){
         if (printer_structure == PrinterStructure::psI3 && !need_insert_timelapse_gcode_for_traditional && !m_spiral_vase && print.config().print_sequence == PrintSequence::ByLayer) {
             std::string timepals_gcode = insert_timelapse_gcode();
@@ -4385,6 +4386,9 @@ LayerResult GCode::process_layer(
                 m_config.apply(instance_to_print.print_object.config(), true);
                 m_layer = layer_to_print.layer();
                 m_object_layer_over_raft = object_layer_over_raft;
+                // Protype fan paint: zones of this object's layer, for _extrude() to split paths by.
+                m_fan_paint_zones = layer_to_print.object_layer != nullptr ?
+                    instance_to_print.print_object.fan_paint_zones(*layer_to_print.object_layer) : nullptr;
                 if (m_config.reduce_crossing_wall)
                     m_avoid_crossing_perimeters.init_layer(*m_layer);
 
@@ -4429,6 +4433,9 @@ LayerResult GCode::process_layer(
                 if (instance_to_print.object_by_extruder.support != nullptr) {
                     m_layer = layers[instance_to_print.layer_id].support_layer;
                     m_object_layer_over_raft = false;
+                    // Protype fan paint never marks supports, their interface or their ironing.
+                    const FanPaintZones *object_fan_paint_zones = m_fan_paint_zones;
+                    m_fan_paint_zones = nullptr;
 
                     //BBS: print supports' brims first
                     if (this->m_objSupportsWithBrim.find(instance_to_print.print_object.id()) != this->m_objSupportsWithBrim.end() && !print_wipe_extrusions) {
@@ -4471,6 +4478,7 @@ LayerResult GCode::process_layer(
 
                     m_layer = layer_to_print.layer();
                     m_object_layer_over_raft = object_layer_over_raft;
+                    m_fan_paint_zones = object_fan_paint_zones;
                 }
                 //FIXME order islands?
                 // Sequential tool path ordering of multiple parts within the same object, aka. perimeter tracking (#5511)
@@ -5442,6 +5450,16 @@ bool GCode::_needSAFC(const ExtrusionPath &path)
 
 std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed)
 {
+    // Protype fan paint: a path crossing painted zones is printed run by run. Splitting happens before any speed is
+    // chosen, so a run of a variable-speed path lies wholly inside or outside a zone and every point of it is marked
+    // by the same rule.
+    if (m_fan_paint_zones != nullptr && m_enable_cooling_markers && ! m_fan_paint_splitting) {
+        const std::vector<FanPaintSpan> spans =
+            split_by_fan_paint_zones(path.polyline.points, fan_paint_line_bit(path.role()), *m_fan_paint_zones);
+        if (! spans.empty())
+            return this->_extrude_fan_painted(path, spans, description, speed);
+    }
+
     std::string gcode;
 
     if (is_bridge(path.role()))
@@ -6237,6 +6255,51 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     }
 
     this->set_last_pos(path.last_point());
+    return gcode;
+}
+
+std::string GCode::_extrude_fan_painted(const ExtrusionPath &path, const std::vector<FanPaintSpan> &spans, const std::string &description, double speed)
+{
+    const auto wrap = [this](int speed_pct, std::string &&run_gcode) -> std::string {
+        if (speed_pct < 0)
+            return std::move(run_gcode);
+        ++ m_fan_paint_marked;
+        return fan_paint_start_marker(speed_pct) + run_gcode + std::string(FAN_PAINT_END_MARKER);
+    };
+    const bool pa_set = m_multi_flow_segment_path_pa_set;
+    m_fan_paint_splitting = true;
+    std::string gcode;
+    if (! path.polyline.fitting_result.empty()) {
+        // Split points would break the fitted arcs: the whole path takes the highest speed it crosses.
+        int speed_pct = -1;
+        for (const FanPaintSpan &span : spans)
+            speed_pct = std::max(speed_pct, span.speed_pct);
+        gcode = wrap(speed_pct, this->_extrude(path, description, speed));
+    } else {
+        const ExtrusionPathSloped *sloped       = dynamic_cast<const ExtrusionPathSloped*>(&path);
+        const double               total_length = path.polyline.length();
+        double                     done_length  = 0.;
+        for (size_t i = 0; i < spans.size(); ++ i) {
+            Polyline     polyline(spans[i].points);
+            const double length = polyline.length();
+            // Adaptive pressure advance is evaluated once per path, on its first run.
+            if (i > 0)
+                m_multi_flow_segment_path_pa_set = true;
+            std::string run_gcode;
+            if (sloped != nullptr && total_length > 0.) {
+                const ExtrusionPathSloped run(std::move(polyline), path,
+                    sloped->interpolate(done_length / total_length), sloped->interpolate((done_length + length) / total_length));
+                run_gcode = this->_extrude(run, description, speed);
+            } else {
+                const ExtrusionPath run(std::move(polyline), path);
+                run_gcode = this->_extrude(run, description, speed);
+            }
+            gcode += wrap(spans[i].speed_pct, std::move(run_gcode));
+            done_length += length;
+        }
+    }
+    m_multi_flow_segment_path_pa_set = pa_set;
+    m_fan_paint_splitting = false;
     return gcode;
 }
 

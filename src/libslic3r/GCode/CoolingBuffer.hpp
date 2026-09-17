@@ -282,6 +282,10 @@ private:
     unsigned int                m_current_extruder;
     //BBS: current fan speed
     int                         m_current_fan_speed;
+    // Protype fan paint: part-fan speed (percent) of the last fan command this buffer wrote, -1 when unknown (none
+    // written yet, or a fan command from custom G-code passed through since). A painted zone entry or exit writes a
+    // fan command only when the speed it needs differs from this one.
+    int                         m_emitted_fan_speed { -1 };
 
     // Cooling-tower state, shared across all extruders for V1 (the strategy
     // is intended for single-tool prints; IDEX would need per-tool towers and

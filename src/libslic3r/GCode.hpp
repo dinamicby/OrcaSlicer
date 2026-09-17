@@ -529,6 +529,10 @@ private:
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
     // Protype fan paint: painted runs marked so far, reported once at the end of the G-code.
     size_t                              m_fan_paint_marked { 0 };
+    // Protype fan paint: zones of the object layer being printed, nullptr while printing anything else.
+    const FanPaintZones*                m_fan_paint_zones { nullptr };
+    // Protype fan paint: set while _extrude_fan_painted() prints the runs of a path, so a run is not split again.
+    bool                                m_fan_paint_splitting { false };
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
     bool                                m_enable_extrusion_role_markers;
@@ -613,6 +617,8 @@ private:
     int get_bed_temperature(const int extruder_id, const bool is_first_layer, const BedType bed_type) const;
 
     std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1);
+    // Protype fan paint: `path` printed run by run along `spans`, each painted run between fan paint markers.
+    std::string _extrude_fan_painted(const ExtrusionPath &path, const std::vector<FanPaintSpan> &spans, const std::string &description, double speed);
     bool _needSAFC(const ExtrusionPath &path);
     void print_machine_envelope(GCodeOutputStream &file, Print &print);
     void _print_first_layer_bed_temperature(GCodeOutputStream &file, Print &print, const std::string &gcode, unsigned int first_printing_extruder_id, bool wait);

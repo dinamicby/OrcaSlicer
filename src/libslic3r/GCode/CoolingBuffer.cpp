@@ -1,4 +1,5 @@
 #include "../GCode.hpp"
+#include "../FanPaint.hpp"
 #include "CoolingBuffer.hpp"
 #include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
@@ -504,6 +505,7 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_fan_speed = -1;
     m_additional_fan_speed = -1;
     m_current_fan_speed = -1;
+    m_emitted_fan_speed = -1;
     // Cooling tower state is per-print; clear it so a new print starts with
     // a fresh tower at Z=0 with no brim emitted yet.
     m_cooling_tower_top_z = 0.f;
@@ -538,6 +540,11 @@ struct CoolingLine
         // ORCA: Add support for ironing fan speed control
         TYPE_IRONING_FAN_START         = 1 << 19,
         TYPE_IRONING_FAN_END           = 1 << 20,
+        // Protype fan paint: ";_PAINT_FAN_START S<pct>" / ";_PAINT_FAN_END" around a painted run (FanPaint.hpp).
+        TYPE_PAINT_FAN_START           = 1 << 21,
+        TYPE_PAINT_FAN_END             = 1 << 22,
+        // Protype fan paint: a fan command from custom G-code, after which the fan speed is not known.
+        TYPE_EXTERNAL_FAN              = 1 << 23,
     };
 
     CoolingLine(unsigned int type, size_t  line_start, size_t  line_end) :
@@ -1038,6 +1045,12 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_IRONING_FAN_START;
         } else if (boost::starts_with(sline, ";_IRONING_FAN_END")) { // ORCA: Add support for ironing fan speed control
             line.type = CoolingLine::TYPE_IRONING_FAN_END;
+        } else if (boost::starts_with(sline, ";_PAINT_FAN_START")) {
+            line.type = CoolingLine::TYPE_PAINT_FAN_START;
+        } else if (boost::starts_with(sline, ";_PAINT_FAN_END")) {
+            line.type = CoolingLine::TYPE_PAINT_FAN_END;
+        } else if (boost::starts_with(sline, "M106") || boost::starts_with(sline, "M107")) {
+            line.type = CoolingLine::TYPE_EXTERNAL_FAN;
         } else if (boost::starts_with(sline, "G4 ")) {
             // Parse the wait time.
             line.type = CoolingLine::TYPE_G4;
@@ -1355,8 +1368,10 @@ std::string CoolingBuffer::apply_layer_cooldown(
         if (fan_speed_new != m_fan_speed) {
             m_fan_speed = fan_speed_new;
             m_current_fan_speed = fan_speed_new;
-            if (immediately_apply)
+            if (immediately_apply) {
                 new_gcode  += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
+                m_emitted_fan_speed = m_fan_speed;
+            }
         }
         //BBS
         if (additional_fan_speed_new != m_additional_fan_speed) {
@@ -1378,6 +1393,26 @@ std::string CoolingBuffer::apply_layer_cooldown(
                                                                {CoolingLine::TYPE_IRONING_FAN_START, false}, // ORCA: Add support for ironing fan speed control
                                                                {CoolingLine::TYPE_FORCE_RESUME_FAN, false}};
     bool need_set_fan = false;
+    // Speed (percent) the automatic cooling asks for right now: the most important active request, else the layer's.
+    const auto automatic_fan_speed = [&]() -> int {
+        if (fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START])
+            return overhang_fan_speed;
+        if (fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]) // ORCA: Add support for separate internal bridge fan speed control
+            return internal_bridge_fan_speed;
+        if (fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START])
+            return supp_interface_fan_speed;
+        if (fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]) // ORCA: Add support for ironing fan speed control
+            return ironing_fan_speed;
+        if (fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1)
+            return m_current_fan_speed;
+        return m_fan_speed;
+    };
+    const auto emit_fan_speed = [this, &new_gcode](int speed) {
+        new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, std::max(0, speed));
+        m_emitted_fan_speed = speed;
+    };
+    // Protype fan paint: exact speed of the painted zone being printed, -1 outside zones.
+    int paint_fan_speed = -1;
 
     for (const CoolingLine *line : lines) {
         const char *line_start  = gcode.c_str() + line->line_start;
@@ -1434,6 +1469,26 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START] = false;
             }
             need_set_fan = true;
+        } else if (line->type & CoolingLine::TYPE_PAINT_FAN_START) {
+            // Protype fan paint: entering a painted zone sets its exact speed, announced for the daemon's lead pass.
+            if (const std::optional<int> speed = parse_fan_paint_start_marker(std::string_view(line_start, line_end - line_start))) {
+                paint_fan_speed = *speed;
+                new_gcode += fan_paint_entry_comment(*speed);
+                if (*speed != m_emitted_fan_speed)
+                    emit_fan_speed(*speed);
+            }
+        } else if (line->type & CoolingLine::TYPE_PAINT_FAN_END) {
+            // Protype fan paint: leaving the zone re-applies whatever the automatic cooling asks for at this point.
+            if (paint_fan_speed >= 0) {
+                paint_fan_speed = -1;
+                new_gcode += FAN_PAINT_EXIT_COMMENT;
+                const int speed = automatic_fan_speed();
+                if (speed != m_emitted_fan_speed)
+                    emit_fan_speed(speed);
+            }
+        } else if (line->type & CoolingLine::TYPE_EXTERNAL_FAN) {
+            new_gcode.append(line_start, line_end - line_start);
+            m_emitted_fan_speed = -1;
         } else if (line->type & CoolingLine::TYPE_FORCE_RESUME_FAN) {
             // check if any fan speed change request is active
             if (m_fan_speed != -1 && !std::any_of(fan_speed_change_requests.begin(), fan_speed_change_requests.end(), [](const std::pair<int, bool>& p) { return p.second; })){
@@ -1529,27 +1584,20 @@ std::string CoolingBuffer::apply_layer_cooldown(
         }
 
         if (need_set_fan) {
-            if (fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, overhang_fan_speed);
-                m_current_fan_speed = overhang_fan_speed;
-            } else if (fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START]){ // ORCA: Add support for separate internal bridge fan speed control
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, internal_bridge_fan_speed);
-                m_current_fan_speed = internal_bridge_fan_speed;
+            // Protype fan paint: inside a painted zone its exact speed stands; requests are kept for the zone exit.
+            if (paint_fan_speed < 0) {
+                const bool role_request =
+                    fan_speed_change_requests[CoolingLine::TYPE_OVERHANG_FAN_START] ||
+                    fan_speed_change_requests[CoolingLine::TYPE_INTERNAL_BRIDGE_FAN_START] ||
+                    fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START] ||
+                    fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START];
+                const int speed = automatic_fan_speed();
+                emit_fan_speed(speed);
+                if (role_request)
+                    m_current_fan_speed = speed;
+                else if (fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1)
+                    fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = false;
             }
-            else if (fan_speed_change_requests[CoolingLine::TYPE_SUPPORT_INTERFACE_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, supp_interface_fan_speed);
-                m_current_fan_speed = supp_interface_fan_speed;
-            }
-            else if (fan_speed_change_requests[CoolingLine::TYPE_IRONING_FAN_START]){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, ironing_fan_speed);
-                m_current_fan_speed = ironing_fan_speed;
-            }
-            else if(fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] && m_current_fan_speed != -1){
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_current_fan_speed);
-                fan_speed_change_requests[CoolingLine::TYPE_FORCE_RESUME_FAN] = false;
-            }
-            else
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_fan_speed);
             need_set_fan = false;
         }
         pos = line_end;
