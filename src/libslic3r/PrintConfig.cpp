@@ -1092,6 +1092,31 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(1));
 
+    def = this->add("support_flow_ratio", coFloat);
+    def->label = L("Support flow ratio");
+    def->category = L("Support");
+    def->tooltip = L("This factor affects the amount of material for the support body. "
+                     "Lower it to make supports easier to detach; raise it to make them stiffer.\n\n"
+                     "The actual support flow used is calculated by multiplying this value with the filament flow ratio "
+                     "and the print flow ratio. Raft base layers use the support role and follow this ratio too.");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1));
+
+    def = this->add("support_interface_flow_ratio", coFloat);
+    def->label = L("Support interface flow ratio");
+    def->category = L("Support");
+    def->tooltip = L("This factor affects the amount of material for the dense interface between support and model. "
+                     "Raise it to close the gaps in a sparse interface (a raft interface that prints like a sieve), "
+                     "lower it to make the interface peel off more easily.\n\n"
+                     "The actual interface flow used is calculated by multiplying this value with the filament flow ratio "
+                     "and the print flow ratio. Raft interface layers use the support interface role and follow this ratio too.");
+    def->min = 0;
+    def->max = 2;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1));
+
 
     def = this->add("precise_outer_wall",coBool);
     def->label = L("Precise wall");
