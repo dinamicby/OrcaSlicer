@@ -281,6 +281,11 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     m_previous_line_is_paint_fan_comment = is_fan_paint_comment(line.raw());
     if (m_previous_line_is_paint_fan_comment || follows_paint_fan_comment)
         need_flush = true;
+    if (m_previous_line_is_paint_fan_comment)
+        // An in-flight kickstart armed by an earlier unpainted ramp-up must not survive across the barrier:
+        // its delayed injection (see the "m_current_kickstart.time > 0" countdown below) would otherwise
+        // splice a stale automatic fan command into the zone, the same way a fresh M-command disarms it.
+        m_current_kickstart.time = -1;
     int16_t painted_fan_speed = -1;
     std::string cmd(line.cmd());
     double time = 0;

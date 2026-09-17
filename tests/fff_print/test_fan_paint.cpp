@@ -235,3 +235,73 @@ TEST_CASE("FanMover moves nothing across a painted zone comment", "[fan_paint][F
     INFO(out);
     CHECK(out.find("; PAINT_FAN END\nG1 X20 Y0 E2\nM106 S255\nG1 X30 Y0 E3\n") != std::string::npos);
 }
+
+namespace {
+
+// Same feedrate (10 mm/s) and flavor as move_fans(), but with an explicit delay/kickstart so a kickstart can
+// be armed by an earlier unpainted fan ramp-up and stay in flight across a later "; PAINT_FAN" barrier.
+std::string move_fans_with_kickstart(const std::string &gcode, float nb_seconds_delay, float kickstart)
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    FanMover mover(writer, nb_seconds_delay, true, false, false, kickstart);
+    return mover.process_gcode(gcode, true);
+}
+
+// The span of `out` from the "; PAINT_FAN S100" zone-entry comment up to (excluding) the next "; PAINT_FAN"
+// comment (the zone's exit). Nothing painted should ever contain a bare M106/M107/M127 fan command in there.
+std::string zone_span_after_entry(const std::string &out) {
+    const size_t entry = out.find("; PAINT_FAN S100");
+    REQUIRE(entry != std::string::npos);
+    const size_t next = out.find("; PAINT_FAN", entry + 1);
+    REQUIRE(next != std::string::npos);
+    return out.substr(entry, next - entry);
+}
+
+} // namespace
+
+TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_seconds_delay=0)", "[fan_paint][FanMover]") {
+    // M106 S255 is a >10% jump from the initial 0 speed: with nb_seconds_delay<=0 and kickstart>0 this arms
+    // m_current_kickstart (FanMover.cpp), which only finishes counting down a couple of G1 moves later --
+    // after the gcode has already entered the painted zone below.
+    const std::string out = move_fans_with_kickstart(
+        "G1 X0 Y0 F600\n"
+        "G1 X5 Y0 E1\n"
+        "M106 S255\n"
+        "G1 X8 Y0 E2\n"
+        "; PAINT_FAN S100\n"
+        "G1 X20 Y0 E3\n"
+        "G1 X30 Y0 E4\n"
+        "; PAINT_FAN END\n"
+        "G1 X40 Y0 E5\n",
+        /*nb_seconds_delay=*/0.0f, /*kickstart=*/0.5f);
+    INFO(out);
+    CHECK(zone_span_after_entry(out).find("M106") == std::string::npos);
+}
+
+TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_seconds_delay=1)", "[fan_paint][FanMover]") {
+    // Same shape, but nb_seconds_delay>0 so the kickstart is armed through the other branch of the M106
+    // handling (the "move it earlier" path, which falls back to m_current_kickstart when it can't splice the
+    // kickstart command directly into the not-yet-full buffer).
+    const std::string out = move_fans_with_kickstart(
+        "G1 X0 Y0 F600\n"
+        "G1 X2 Y0 E1\n"
+        "M106 S255\n"
+        "G1 X4 Y0 E2\n"
+        "; PAINT_FAN S100\n"
+        "G1 X20 Y0 E3\n"
+        "G1 X30 Y0 E4\n"
+        "; PAINT_FAN END\n"
+        "G1 X40 Y0 E5\n",
+        /*nb_seconds_delay=*/1.0f, /*kickstart=*/0.5f);
+    INFO(out);
+    CHECK(zone_span_after_entry(out).find("M106") == std::string::npos);
+}
+
+TEST_CASE("FanMover still leaves the fan command right after a painted zone exit in place when kickstart is enabled", "[fan_paint][FanMover]") {
+    const std::string out = move_fans_with_kickstart(
+        "G1 X0 Y0 F600\nG1 X10 Y0 E1\n; PAINT_FAN END\nM106 S51\nG1 X20 Y0 E2\nG1 X30 Y0 E3\n",
+        /*nb_seconds_delay=*/1.0f, /*kickstart=*/0.5f);
+    INFO(out);
+    CHECK(out.find("; PAINT_FAN END\nM106 S51\nG1 X20 Y0 E2\n") != std::string::npos);
+}
