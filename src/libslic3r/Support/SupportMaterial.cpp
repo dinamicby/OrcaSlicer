@@ -1420,7 +1420,9 @@ static inline ExPolygons detect_overhangs(
         // FIXME if there are multiple regions with different extrusion width, the following code may not be right.
         float fw = float(layer.regions().front()->flow(frExternalPerimeter).scaled_width());
         ExPolygons lower_layer_expolys;
-        for (const ExPolygon& expoly : lower_layer.lslices) {
+        // Protype: the mesh outline, so enlarged polyholes below don't read as sharp tails above
+        // (see Layer::lslices_polyhole_excess); `lower_layer_polygons` is already the same outline.
+        for (const ExPolygon& expoly : lower_layer.lslices_before_polyholes()) {
             if (!offset_ex(expoly, -fw / 2).empty()) {
                 lower_layer_expolys.emplace_back(expoly);
             }
@@ -1524,7 +1526,8 @@ static inline ExPolygons detect_overhangs(
     if (layer.lower_layer) {
         for (ExPolygon& poly : overhang_areas) {
             float fw = float(layer.regions().front()->flow(frExternalPerimeter).scaled_width());
-            auto cluster_boundary_ex = intersection_ex(poly, offset_ex(layer.lower_layer->lslices, std::max(fw, lower_layer_offset) + scale_(0.1)));
+            // Protype: mesh outline below, as everywhere overhangs are classified (Layer::lslices_polyhole_excess).
+            auto cluster_boundary_ex = intersection_ex(poly, offset_ex(layer.lower_layer->lslices_before_polyholes(), std::max(fw, lower_layer_offset) + scale_(0.1)));
             Polygons cluster_boundary = to_polygons(cluster_boundary_ex);
             if (cluster_boundary.empty()) continue;
             double dist_max = 0;
@@ -2130,7 +2133,9 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
         [&](const tbb::blocked_range<size_t>& range) {
             for (size_t layer_id = range.begin(); layer_id < range.end(); layer_id++) {
                 const Layer& layer = *object.layers()[layer_id];
-                Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices);
+                // Protype: what the layer below holds up is the mesh outline, not the enlarged polyholes it prints
+                // (Layer::lslices_polyhole_excess). Collision and trimming below keep reading lslices.
+                Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices_before_polyholes());
 
                 overhangs_per_layers[layer_id] = detect_overhangs(layer, layer_id, lower_layer_polygons, *m_print_config, *m_object_config, annotations, m_support_params.gap_xy
 #ifdef SLIC3R_DEBUG
@@ -2219,7 +2224,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
                 } while (0);
 
                 if (is_sharp_tail) {
-                    ExPolygons overhang = diff_ex({ expoly }, lower_layer->lslices);
+                    // Protype: mesh outline below (Layer::lslices_polyhole_excess).
+                    ExPolygons overhang = diff_ex({ expoly }, lower_layer->lslices_before_polyholes());
                     layer->sharp_tails.push_back(expoly);
                     layer->sharp_tails_height.push_back( accum_height );
 
@@ -2316,7 +2322,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
     for (size_t layer_id = layer_id_start; layer_id < num_layers; layer_id++) {
         const Layer& layer = *object.layers()[layer_id];
         Polygons            overhang_polygons = to_polygons(overhangs_per_layers[layer_id]);
-        Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices);
+        // Protype: same outline the overhangs above were detected against (Layer::lslices_polyhole_excess).
+        Polygons            lower_layer_polygons = (layer_id == 0) ? Polygons() : to_polygons(object.layers()[layer_id - 1]->lslices_before_polyholes());
         SlicesMarginCache   slices_margin;
 
         auto [contact_polygons, enforcer_polygons, no_interface_offset] =

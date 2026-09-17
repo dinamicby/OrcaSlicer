@@ -230,7 +230,7 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     size_t num_overhang_layers = support_auto ? num_object_layers : std::min(num_object_layers, std::max(size_t(support_enforce_layers), enforcers_layers.size()));
     tbb::parallel_for(tbb::blocked_range<LayerIndex>(1, num_overhang_layers),
         [&print_object, &config, &print_config, &enforcers_layers, &blockers_layers,
-         support_auto, support_enforce_layers, support_threshold_auto, tan_threshold, enforcer_overhang_offset, num_raft_layers, radius_sample_resolution, &throw_on_cancel, &out]
+         support_auto, support_enforce_layers, support_threshold_auto, tan_threshold, enforcer_overhang_offset, num_raft_layers, radius_sample_resolution, extrusion_width_scaled, &throw_on_cancel, &out]
         (const tbb::blocked_range<LayerIndex> &range) {
         for (LayerIndex layer_id = range.begin(); layer_id < range.end(); ++ layer_id) {
             const Layer   &current_layer  = *print_object.get_layer(layer_id);
@@ -254,7 +254,15 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
                     lower_layer_offset = external_perimeter_width - float(scale_(config.support_threshold_overlap.get_abs_value(unscale_(external_perimeter_width))));
                 } else
                     lower_layer_offset = scaled<float>(lower_layer.height / tan_threshold);
-                Polygons lower_layer_offseted = offset(lower_layer.lslices_extrudable, lower_layer_offset);
+                // Protype: the layer below holds up its mesh outline, not the enlarged polyholes it prints
+                // (Layer::lslices_polyhole_excess). Dead code today - the active path is
+                // TreeSupport::detect_overhangs, patched the same way - kept in step so flipping the #if below
+                // does not bring the artefact back.
+                ExPolygons lower_unenlarged = lower_layer.lslices_before_polyholes();
+                Polygons lower_layer_offseted = offset(
+                    lower_layer.lslices_polyhole_excess.empty() ? lower_layer.lslices_extrudable
+                        : intersection_ex(lower_unenlarged, offset2_ex(lower_unenlarged, -extrusion_width_scaled / 2, extrusion_width_scaled)),
+                    lower_layer_offset);
                 overhangs = diff(current_layer.lslices_extrudable, lower_layer_offseted);
                 if (lower_layer_offset == 0) {
                     raw_overhangs = overhangs;

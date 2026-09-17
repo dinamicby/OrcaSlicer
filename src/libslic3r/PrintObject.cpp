@@ -176,9 +176,25 @@ Polygons create_polyholes(const Point center, const coord_t radius, const coord_
     return list;
 }
 
+// Protype: the solid of `island` that replacing its hole `hole` by the larger `polyhole` takes away.
+// Both arrive as hole contours (clockwise), which Clipper's non-zero fill rule would read as empty, so
+// they are flipped before the difference. Clipping to the island drops anything a polyhole corner pushed
+// past the island's outer contour or into a neighbouring hole.
+static ExPolygons polyhole_removed_solid(const ExPolygon &island, const Polygon &hole, const Polygon &polyhole)
+{
+    Polygon enlarged = polyhole;
+    enlarged.make_counter_clockwise();
+    Polygon original = hole;
+    original.make_counter_clockwise();
+    ExPolygons removed = diff_ex(Polygons{ enlarged }, Polygons{ original });
+    return removed.empty() ? removed : intersection_ex(removed, island);
+}
+
 // Detect and convert holes to polyholes, implementation is ported from SuperSlicer
 void PrintObject::_transform_hole_to_polyholes()
 {
+    for (Layer *layer : m_layers)
+        layer->lslices_polyhole_excess.clear();
     // get all circular holes for each layer
     // the id is center-diameter-extruderid
     //the tuple is Point center; float diameter_max; int extruder_id; coord_t max_variation; bool twist;
@@ -274,9 +290,15 @@ void PrintObject::_transform_hole_to_polyholes()
         for (auto& poly_to_replace : entry.second) {
             Polygon polyhole = polyholes[poly_to_replace.second % polyholes.size()];
             //search the clone in layers->slices
-            for (ExPolygon& explo_slice : m_layers[poly_to_replace.second]->lslices) {
+            Layer* layer = m_layers[poly_to_replace.second];
+            for (ExPolygon& explo_slice : layer->lslices) {
                 for (Polygon& poly_slice : explo_slice.holes) {
                     if (poly_slice.points == poly_to_replace.first->points) {
+                        // Protype: remember what the enlarged hole eats, so support overhang detection can put it
+                        // back (Layer::lslices_polyhole_excess). Recorded only where an lslices hole is really
+                        // replaced: on a multi region layer the points never match and the round hole survives,
+                        // and there the excess would wrongly cancel a genuine overhang.
+                        append(layer->lslices_polyhole_excess, polyhole_removed_solid(explo_slice, poly_slice, polyhole));
                         poly_slice.points = polyhole.points;
                     }
                 }
