@@ -10,12 +10,18 @@
 // that the daemon's lead pass works from.
 
 #include "libslic3r.h"
+#include "BoundingBox.hpp"
+#include "ExPolygon.hpp"
 #include "ExtrusionEntity.hpp"
+#include "Point.hpp"
+#include "Polygon.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace Slic3r {
 
@@ -52,6 +58,34 @@ struct FanPaintBand
 // Whether the layer sliced at `slice_z` belongs to `band`, by the rule libslic3r hands a layer the config of a
 // layer range with (layer_range_next(), PrintObjectSlice.cpp): z_min <= slice_z + EPSILON < z_max.
 bool fan_paint_band_covers_layer(const FanPaintBand &band, coordf_t slice_z);
+
+struct FanPaintZone
+{
+    ExPolygons  area;
+    BoundingBox bbox;
+    uint8_t     speed_pct;
+    uint8_t     line_mask;
+};
+using FanPaintZones = std::vector<FanPaintZone>;
+
+// Zones of one layer. A projection holds the facets of one encoded value projected onto the layer and is widened
+// by `expansion` (scaled): a painted vertical face projects to a line, and the walls it stands for lie inside the
+// part. A band holds the layer outline and is taken as is. Values that do not decode make no zone.
+FanPaintZones build_fan_paint_layer_zones(const std::vector<std::pair<uint8_t, Polygons>>   &projections,
+                                          const std::vector<std::pair<uint8_t, ExPolygons>> &bands,
+                                          coord_t                                            expansion);
+
+// A run of a path: its points and the painted speed over it, -1 outside every zone.
+struct FanPaintSpan
+{
+    Points points;
+    int    speed_pct;
+};
+
+// `polyline` cut where it crosses the boundary of a zone that paints `line_bit` lines: its own points plus one
+// point per crossing, grouped into runs of one speed (the highest where zones overlap). Empty when no part of
+// the path lies in such a zone, so there is nothing to mark.
+std::vector<FanPaintSpan> split_by_fan_paint_zones(const Points &polyline, uint8_t line_bit, const FanPaintZones &zones);
 
 // Engine-internal markers around a painted run of a path, consumed by CoolingBuffer.
 std::string fan_paint_start_marker(int speed_pct);
