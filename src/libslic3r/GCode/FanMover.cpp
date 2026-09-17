@@ -1,6 +1,7 @@
 #include "FanMover.hpp"
 
 #include "GCodeReader.hpp"
+#include "../FanPaint.hpp"
 
 #include <iomanip>
 /*
@@ -273,6 +274,14 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
 {
     // processes 'normal' gcode lines
     bool need_flush = false;
+    // Protype fan paint: nothing moves across a "; PAINT_FAN" comment. The comment, the line right after it (its
+    // fan command when the speed changes there) and everything buffered before them are printed in place, and
+    // that fan command is neither moved nor dropped: the daemon's lead pass moves painted fan commands itself.
+    const bool follows_paint_fan_comment = m_previous_line_is_paint_fan_comment;
+    m_previous_line_is_paint_fan_comment = is_fan_paint_comment(line.raw());
+    if (m_previous_line_is_paint_fan_comment || follows_paint_fan_comment)
+        need_flush = true;
+    int16_t painted_fan_speed = -1;
     std::string cmd(line.cmd());
     double time = 0;
     int16_t fan_speed = -1;
@@ -306,7 +315,12 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                 fan_speed = 100 * fan_speed / fan_baseline;
                 //speed change: stop kickstart reverting if any
                 m_current_kickstart.time = -1;
-                if (!m_is_custom_gcode) {
+                if (follows_paint_fan_comment) {
+                    // Buffered as a plain line (fan_speed -1): the flush below prints it as is.
+                    painted_fan_speed = fan_speed;
+                    m_back_buffer_fan_speed = fan_speed;
+                    fan_speed = -1;
+                } else if (!m_is_custom_gcode) {
                     // if slow down => put in the queue. if not =>
                     if (m_back_buffer_fan_speed < fan_speed) {
                         if (nb_seconds_delay > 0 && (!only_overhangs || current_role == ExtrusionRole::erOverhangPerimeter)) {
@@ -504,6 +518,8 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
             }
             remove_from_buffer(m_buffer.begin());
         }
+        if (painted_fan_speed >= 0)
+            m_front_buffer_fan_speed = painted_fan_speed;
     }
     double sum = 0;
     for (auto& data : m_buffer) sum += data.time;

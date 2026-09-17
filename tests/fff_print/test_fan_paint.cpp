@@ -200,3 +200,38 @@ TEST_CASE("A split keeps the path's own vertices", "[fan_paint]") {
     CHECK(spans[1].speed_pct == 80);
     CHECK((spans[1].points == Points{ mm(10, 0), mm(12, 0), mm(12, 3) }));
 }
+
+#include "libslic3r/GCodeWriter.hpp"
+#include "libslic3r/GCode/FanMover.hpp"
+
+namespace {
+
+// `gcode` through a FanMover that moves fan speed-ups 1 s earlier (no kickstart), flushed as one layer.
+// The feedrate is 10 mm/s, so each 10 mm move below takes 1 s.
+std::string move_fans(const std::string &gcode)
+{
+    GCodeWriter writer;
+    writer.config.gcode_flavor.value = gcfMarlinFirmware;
+    FanMover mover(writer, 1.0f, true, false, false, 0.0f);
+    return mover.process_gcode(gcode, true);
+}
+
+} // namespace
+
+TEST_CASE("FanMover still moves an unpainted fan speed-up earlier", "[fan_paint][FanMover]") {
+    const std::string out = move_fans("G1 X0 Y0 F600\nG1 X10 Y0 E1\nG1 X20 Y0 E2\nM106 S204\nG1 X30 Y0 E3\n");
+    INFO(out);
+    CHECK(out.find("G1 X10 Y0 E1\nM106 S204\nG1 X20 Y0 E2\n") != std::string::npos);
+}
+
+TEST_CASE("FanMover leaves the fan command of a painted zone entry in place", "[fan_paint][FanMover]") {
+    const std::string out = move_fans("G1 X0 Y0 F600\nG1 X10 Y0 E1\nG1 X20 Y0 E2\n; PAINT_FAN S80\nM106 S204\nG1 X30 Y0 E3\n");
+    INFO(out);
+    CHECK(out.find("G1 X20 Y0 E2\n; PAINT_FAN S80\nM106 S204\nG1 X30 Y0 E3\n") != std::string::npos);
+}
+
+TEST_CASE("FanMover moves nothing across a painted zone comment", "[fan_paint][FanMover]") {
+    const std::string out = move_fans("G1 X0 Y0 F600\nG1 X10 Y0 E1\n; PAINT_FAN END\nG1 X20 Y0 E2\nM106 S255\nG1 X30 Y0 E3\n");
+    INFO(out);
+    CHECK(out.find("; PAINT_FAN END\nG1 X20 Y0 E2\nM106 S255\nG1 X30 Y0 E3\n") != std::string::npos);
+}

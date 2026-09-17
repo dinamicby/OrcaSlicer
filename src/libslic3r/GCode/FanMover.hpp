@@ -45,6 +45,8 @@ private:
     // in unit/second
     double m_current_speed = 1000 / 60.0;
     bool m_is_custom_gcode = false;
+    // Protype fan paint: the previous line was a "; PAINT_FAN" comment (see _process_gcode_line).
+    bool m_previous_line_is_paint_fan_comment = false;
     uint16_t m_currrent_extruder = 0;
 
     // variable for when you add a line (front of the buffer)
