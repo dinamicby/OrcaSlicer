@@ -1,6 +1,7 @@
 #include "../GCode.hpp"
 #include "../FanPaint.hpp"
 #include "CoolingBuffer.hpp"
+#include "FanMover.hpp"
 #include <algorithm>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/algorithm/string/replace.hpp>
@@ -543,7 +544,7 @@ struct CoolingLine
         // Protype fan paint: ";_PAINT_FAN_START S<pct>" / ";_PAINT_FAN_END" around a painted run (FanPaint.hpp).
         TYPE_PAINT_FAN_START           = 1 << 21,
         TYPE_PAINT_FAN_END             = 1 << 22,
-        // Protype fan paint: a fan command from custom G-code, after which the fan speed is not known.
+        // Protype fan paint: a part-cooling fan command from custom G-code (parse_part_fan_command(), FanMover.hpp).
         TYPE_EXTERNAL_FAN              = 1 << 23,
     };
 
@@ -1049,7 +1050,8 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_PAINT_FAN_START;
         } else if (boost::starts_with(sline, ";_PAINT_FAN_END")) {
             line.type = CoolingLine::TYPE_PAINT_FAN_END;
-        } else if (boost::starts_with(sline, "M106") || boost::starts_with(sline, "M107")) {
+        } else if (parse_part_fan_command(sline, m_config.gcode_flavor.value)) {
+            // Other fans (M106 P2 auxiliary, M106 P3 chamber) pass through untouched.
             line.type = CoolingLine::TYPE_EXTERNAL_FAN;
         } else if (boost::starts_with(sline, "G4 ")) {
             // Parse the wait time.
@@ -1488,7 +1490,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
             }
         } else if (line->type & CoolingLine::TYPE_EXTERNAL_FAN) {
             new_gcode.append(line_start, line_end - line_start);
-            m_emitted_fan_speed = -1;
+            m_emitted_fan_speed = part_fan_speed_pct(std::string(line_start, line_end), m_config.gcode_flavor.value).value_or(-1);
         } else if (line->type & CoolingLine::TYPE_FORCE_RESUME_FAN) {
             // check if any fan speed change request is active
             if (m_fan_speed != -1 && !std::any_of(fan_speed_change_requests.begin(), fan_speed_change_requests.end(), [](const std::pair<int, bool>& p) { return p.second; })){

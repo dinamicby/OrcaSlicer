@@ -3,6 +3,7 @@
 #include "GCodeReader.hpp"
 #include "../FanPaint.hpp"
 
+#include <cmath>
 #include <iomanip>
 /*
 #include <memory.h>
@@ -83,10 +84,15 @@ void change_axis_value(std::string& line, char axis, const float new_value, cons
     line = line.replace(pos, end - pos, ss.str());
 }
 
-int16_t get_fan_speed(const std::string &line, GCodeFlavor flavor) {
+std::optional<PartFanCommand> parse_part_fan_command(const std::string &line, GCodeFlavor flavor)
+{
+    // A NaN from get_axis_value() is a value word that is missing or does not read as a number.
+    const auto command = [](float value) {
+        return PartFanCommand{ std::isnan(value) ? std::nullopt : std::optional<float>(value) };
+    };
     if (line.compare(0, 4, "M106") == 0) {
         if (flavor == (gcfMach3) || flavor == (gcfMachinekit)) {
-            return (int16_t)get_axis_value(line, 'P');
+            return command(get_axis_value(line, 'P'));
         } else {
             // Bambu machines use both M106 P1(not P0!) and M106 for part cooling fan.
             // Non-bambu machines usually use M106 (without P parameter) for part cooling fan.
@@ -94,18 +100,43 @@ int16_t get_fan_speed(const std::string &line, GCodeFlavor flavor) {
             // To keep compatibility with Bambu machines, we accept M106 and M106 P1 as the only two valid form
             // of gcode that control the part cooling fan. Any other command will be ignored!
             const auto idx = get_axis_value(line, 'P');
-            if (!isnan(idx) && idx != 1.0f) {
-                return -1;
+            if (!std::isnan(idx) && idx != 1.0f) {
+                return std::nullopt;
             }
-            return (int16_t)get_axis_value(line, 'S');
+            return command(get_axis_value(line, 'S'));
         }
     } else if (line.compare(0, 4, "M127") == 0 || line.compare(0, 4, "M107") == 0) {
-        return 0;
+        return PartFanCommand{ 0.f };
     } else if ((flavor == (gcfMakerWare) || flavor == (gcfSailfish)) && line.compare(0, 4, "M126") == 0) {
-        return (int16_t)get_axis_value(line, 'T');
+        return command(get_axis_value(line, 'T'));
     } else {
-        return -1;
+        return std::nullopt;
     }
+}
+
+std::optional<int> part_fan_speed_pct(const std::string &line, GCodeFlavor flavor)
+{
+    const std::optional<PartFanCommand> command = parse_part_fan_command(line, flavor);
+    if (! command || ! command->value)
+        return std::nullopt;
+    if (line.compare(0, 4, "M107") == 0 || line.compare(0, 4, "M127") == 0)
+        return 0;
+    static constexpr int MAX_FAN_SPEED_PCT = 100;
+    for (int speed = 0; speed <= MAX_FAN_SPEED_PCT; ++ speed) {
+        const std::string                   written         = GCodeWriter::set_fan(flavor, speed);
+        const std::optional<PartFanCommand> written_command = parse_part_fan_command(written, flavor);
+        if (written.compare(0, 4, line, 0, 4) == 0 && written_command && written_command->value == command->value)
+            return speed;
+    }
+    return std::nullopt;
+}
+
+static int16_t get_fan_speed(const std::string &line, GCodeFlavor flavor) {
+    const std::optional<PartFanCommand> command = parse_part_fan_command(line, flavor);
+    if (! command)
+        return -1;
+    // A command without a readable value reads as 0 here, as the cast from NaN this replaced produced it.
+    return command->value ? (int16_t)*command->value : 0;
 
 }
 

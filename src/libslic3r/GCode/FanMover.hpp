@@ -9,9 +9,28 @@
 #include "../Point.hpp"
 #include "../GCodeReader.hpp"
 #include "../GCodeWriter.hpp"
+#include <optional>
 #include <regex>
+#include <string>
 
 namespace Slic3r {
+
+// A G-code line that sets the part-cooling fan, by the one rule FanMover and CoolingBuffer read fan commands with:
+// M106 with no P word or with P1 (Bambu) carries the value in S, on Mach3/Machinekit in P; M107 and M127 turn the fan
+// off; M126 on MakerWare/Sailfish carries it in T. M106 P2 (auxiliary fan), M106 P3 (chamber fan) and every other line
+// set no part-cooling fan.
+struct PartFanCommand
+{
+    // The value word as written (0..255 for M106 S), std::nullopt when the command has none that reads as a number.
+    std::optional<float> value;
+};
+std::optional<PartFanCommand> parse_part_fan_command(const std::string &line, GCodeFlavor flavor);
+
+// Speed (percent) the part-cooling fan command `line` runs the fan at, named the way GCodeWriter::set_fan() writes
+// speeds: M107 and M127 are 0 %, any other command is the speed set_fan() writes with the same command word and the
+// same value. std::nullopt when `line` sets no part-cooling fan or names no speed that way (no readable value, a value
+// set_fan() writes for no speed, M126 which set_fan() writes bare for every speed).
+std::optional<int> part_fan_speed_pct(const std::string &line, GCodeFlavor flavor);
 
 class BufferData {
 public:

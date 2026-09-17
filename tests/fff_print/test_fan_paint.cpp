@@ -349,3 +349,104 @@ TEST_CASE("FanMover writes the pending kickstart target before a painted zone en
     CHECK(last_fan_command_before(out, "; PAINT_FAN S80") == "M106 S204");
     CHECK(zone_span_after_entry(out, "; PAINT_FAN S80").find("M106") == std::string::npos);
 }
+
+namespace {
+
+// Value of the part-cooling fan command `line` carries, by the rule FanMover and CoolingBuffer share; fails the test
+// case when `line` is no part-cooling fan command.
+std::optional<float> part_fan_value(const std::string &line, GCodeFlavor flavor)
+{
+    const std::optional<PartFanCommand> command = parse_part_fan_command(line, flavor);
+    INFO(line);
+    REQUIRE(command.has_value());
+    return command->value;
+}
+
+} // namespace
+
+TEST_CASE("M106 without P or with P1 sets the part-cooling fan from S", "[fan_paint][FanMover]") {
+    CHECK(part_fan_value("M106 S204", gcfMarlinFirmware) == std::optional<float>(204.f));
+    CHECK(part_fan_value("M106 S255 ; enable fan", gcfMarlinLegacy) == std::optional<float>(255.f));
+    CHECK(part_fan_value("M106 P1 S128", gcfKlipper) == std::optional<float>(128.f));
+    CHECK(part_fan_value("M106 S0\n", gcfRepRapFirmware) == std::optional<float>(0.f));
+}
+
+TEST_CASE("M106 for another fan sets no part-cooling fan", "[fan_paint][FanMover]") {
+    CHECK_FALSE(parse_part_fan_command("M106 P2 S0", gcfMarlinFirmware).has_value());
+    CHECK_FALSE(parse_part_fan_command("M106 P2 S255 ; enable additional fan", gcfKlipper).has_value());
+    CHECK_FALSE(parse_part_fan_command("M106 P3 S102", gcfMarlinFirmware).has_value());
+    CHECK_FALSE(parse_part_fan_command("M106 P0 S255", gcfMarlinFirmware).has_value());
+}
+
+TEST_CASE("M107 and M127 turn the part-cooling fan off", "[fan_paint][FanMover]") {
+    CHECK(part_fan_value("M107", gcfMarlinFirmware) == std::optional<float>(0.f));
+    CHECK(part_fan_value("M107 ; disable fan", gcfKlipper) == std::optional<float>(0.f));
+    CHECK(part_fan_value("M127", gcfMakerWare) == std::optional<float>(0.f));
+    CHECK(part_fan_value("M127", gcfMarlinFirmware) == std::optional<float>(0.f));
+}
+
+TEST_CASE("Mach3 and Machinekit carry the part-cooling fan value in P", "[fan_paint][FanMover]") {
+    CHECK(part_fan_value("M106 P204", gcfMach3) == std::optional<float>(204.f));
+    CHECK(part_fan_value("M106 P2", gcfMachinekit) == std::optional<float>(2.f));
+}
+
+TEST_CASE("M126 sets the part-cooling fan only on MakerWare and Sailfish", "[fan_paint][FanMover]") {
+    CHECK(part_fan_value("M126 T0", gcfMakerWare) == std::optional<float>(0.f));
+    CHECK(part_fan_value("M126", gcfSailfish) == std::nullopt);
+    CHECK_FALSE(parse_part_fan_command("M126 T0", gcfMarlinFirmware).has_value());
+}
+
+TEST_CASE("A part-cooling fan command without a readable value is still one", "[fan_paint][FanMover]") {
+    CHECK(part_fan_value("M106", gcfMarlinFirmware) == std::nullopt);
+    CHECK(part_fan_value("M106 P1", gcfKlipper) == std::nullopt);
+}
+
+TEST_CASE("Lines other than fan commands set no part-cooling fan", "[fan_paint][FanMover]") {
+    CHECK_FALSE(parse_part_fan_command("G1 X10 Y0 S5", gcfMarlinFirmware).has_value());
+    CHECK_FALSE(parse_part_fan_command("; M106 S204", gcfMarlinFirmware).has_value());
+    CHECK_FALSE(parse_part_fan_command("", gcfMarlinFirmware).has_value());
+}
+
+TEST_CASE("Every fan command GCodeWriter writes reads back as a part-cooling fan command", "[fan_paint][FanMover]") {
+    for (const GCodeFlavor flavor : { gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfTeacup, gcfMach3, gcfMachinekit, gcfMakerWare, gcfSailfish })
+        for (unsigned int speed = 0; speed <= 100; ++ speed) {
+            const std::string line = GCodeWriter::set_fan(flavor, speed);
+            INFO(line);
+            CHECK(parse_part_fan_command(line, flavor).has_value());
+        }
+}
+
+TEST_CASE("A part-cooling fan command names the speed GCodeWriter writes it for", "[fan_paint][FanMover]") {
+    CHECK(part_fan_speed_pct("M106 S204", gcfMarlinFirmware) == std::optional<int>(80));
+    CHECK(part_fan_speed_pct("M106 P1 S255", gcfKlipper) == std::optional<int>(100));
+    CHECK(part_fan_speed_pct("M106 S12 ; enable fan", gcfMarlinFirmware) == std::optional<int>(5));
+    CHECK(part_fan_speed_pct("M106 S0", gcfMarlinFirmware) == std::optional<int>(0));
+    CHECK(part_fan_speed_pct("M107", gcfMarlinFirmware) == std::optional<int>(0));
+    CHECK(part_fan_speed_pct("M106 P204", gcfMach3) == std::optional<int>(80));
+    CHECK(part_fan_speed_pct("M107", gcfMachinekit) == std::optional<int>(0));
+    CHECK(part_fan_speed_pct("M127", gcfSailfish) == std::optional<int>(0));
+}
+
+TEST_CASE("A fan command names no speed when GCodeWriter writes it for none", "[fan_paint][FanMover]") {
+    // 203 lies between the values of 79 % (201) and 80 % (204).
+    CHECK(part_fan_speed_pct("M106 S203", gcfMarlinFirmware) == std::nullopt);
+    CHECK(part_fan_speed_pct("M106", gcfMarlinFirmware) == std::nullopt);
+    CHECK(part_fan_speed_pct("M106 P2 S0", gcfMarlinFirmware) == std::nullopt);
+    CHECK(part_fan_speed_pct("G1 X10", gcfMarlinFirmware) == std::nullopt);
+    // Mach3 carries the value in P, so M106 S204 has none there.
+    CHECK(part_fan_speed_pct("M106 S204", gcfMach3) == std::nullopt);
+    // M126 switches the fan on at every speed, and its T word is no speed.
+    CHECK(part_fan_speed_pct("M126", gcfMakerWare) == std::nullopt);
+    CHECK(part_fan_speed_pct("M126 T0", gcfMakerWare) == std::nullopt);
+}
+
+TEST_CASE("Every speed GCodeWriter writes a fan command for reads back as that speed", "[fan_paint][FanMover]") {
+    for (const GCodeFlavor flavor : { gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfTeacup, gcfMach3, gcfMachinekit })
+        for (int speed = 1; speed <= 100; ++ speed) {
+            const std::string line = GCodeWriter::set_fan(flavor, speed);
+            INFO(line);
+            CHECK(part_fan_speed_pct(line, flavor) == std::optional<int>(speed));
+        }
+    for (const GCodeFlavor flavor : { gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfTeacup, gcfMakerWare, gcfSailfish })
+        CHECK(part_fan_speed_pct(GCodeWriter::set_fan(flavor, 0), flavor) == std::optional<int>(0));
+}
