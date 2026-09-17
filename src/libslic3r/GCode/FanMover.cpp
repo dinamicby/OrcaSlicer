@@ -281,11 +281,19 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
     m_previous_line_is_paint_fan_comment = is_fan_paint_comment(line.raw());
     if (m_previous_line_is_paint_fan_comment || follows_paint_fan_comment)
         need_flush = true;
-    if (m_previous_line_is_paint_fan_comment)
+    if (m_previous_line_is_paint_fan_comment) {
         // An in-flight kickstart armed by an earlier unpainted ramp-up must not survive across the barrier:
         // its delayed injection (see the "m_current_kickstart.time > 0" countdown below) would otherwise
-        // splice a stale automatic fan command into the zone, the same way a fresh M-command disarms it.
+        // splice a stale automatic fan command into the zone. But arming a kickstart already wrote the
+        // boosted 100% pulse and made the bookkeeping (m_front_buffer_fan_speed) treat the real target as "in
+        // effect" (see the two arming branches above) -- so a bare disarm would silently drop the real
+        // target command and leave the G-code stuck at the pulse forever. Write it now instead, right before
+        // the barrier, exactly as the countdown below would have (same raw text, same fan_speed, is_kickstart
+        // to bypass the "no change since front buffer" dedup in the flush loop), then disarm.
+        if (m_current_kickstart.time > 0)
+            put_in_buffer(BufferData(m_current_kickstart.raw, 0, m_current_kickstart.fan_speed, true));
         m_current_kickstart.time = -1;
+    }
     int16_t painted_fan_speed = -1;
     std::string cmd(line.cmd());
     double time = 0;

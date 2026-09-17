@@ -206,14 +206,37 @@ TEST_CASE("A split keeps the path's own vertices", "[fan_paint]") {
 
 namespace {
 
-// `gcode` through a FanMover that moves fan speed-ups 1 s earlier (no kickstart), flushed as one layer.
-// The feedrate is 10 mm/s, so each 10 mm move below takes 1 s.
-std::string move_fans(const std::string &gcode)
+// `gcode` through a FanMover that moves fan speed-ups `nb_seconds_delay` s earlier, with an optional kickstart
+// (0 = disabled, the default -- matches the original no-kickstart helper), flushed as one layer. The feedrate
+// is 10 mm/s, so each 10 mm move below takes 1 s.
+std::string move_fans(const std::string &gcode, float nb_seconds_delay = 1.0f, float kickstart = 0.0f)
 {
     GCodeWriter writer;
     writer.config.gcode_flavor.value = gcfMarlinFirmware;
-    FanMover mover(writer, 1.0f, true, false, false, 0.0f);
+    FanMover mover(writer, nb_seconds_delay, true, false, false, kickstart);
     return mover.process_gcode(gcode, true);
+}
+
+// The span of `out` from the `entry_comment` zone-entry comment up to (excluding) the next "; PAINT_FAN"
+// comment (the zone's exit). Nothing painted should ever contain a bare M106/M107/M127 fan command in there.
+std::string zone_span_after_entry(const std::string &out, const std::string &entry_comment) {
+    const size_t entry = out.find(entry_comment);
+    REQUIRE(entry != std::string::npos);
+    const size_t next = out.find("; PAINT_FAN", entry + 1);
+    REQUIRE(next != std::string::npos);
+    return out.substr(entry, next - entry);
+}
+
+// The last "M106 ..." line in `out` before `marker` (e.g. a "; PAINT_FAN ..." comment) -- i.e. the fan state
+// actually in effect in the G-code right before crossing into (or out of) a painted zone.
+std::string last_fan_command_before(const std::string &out, const std::string &marker) {
+    const size_t marker_pos = out.find(marker);
+    REQUIRE(marker_pos != std::string::npos);
+    const size_t cmd_pos = out.rfind("M106", marker_pos);
+    REQUIRE(cmd_pos != std::string::npos);
+    const size_t line_end = out.find('\n', cmd_pos);
+    REQUIRE(line_end != std::string::npos);
+    return out.substr(cmd_pos, line_end - cmd_pos);
 }
 
 } // namespace
@@ -236,35 +259,11 @@ TEST_CASE("FanMover moves nothing across a painted zone comment", "[fan_paint][F
     CHECK(out.find("; PAINT_FAN END\nG1 X20 Y0 E2\nM106 S255\nG1 X30 Y0 E3\n") != std::string::npos);
 }
 
-namespace {
-
-// Same feedrate (10 mm/s) and flavor as move_fans(), but with an explicit delay/kickstart so a kickstart can
-// be armed by an earlier unpainted fan ramp-up and stay in flight across a later "; PAINT_FAN" barrier.
-std::string move_fans_with_kickstart(const std::string &gcode, float nb_seconds_delay, float kickstart)
-{
-    GCodeWriter writer;
-    writer.config.gcode_flavor.value = gcfMarlinFirmware;
-    FanMover mover(writer, nb_seconds_delay, true, false, false, kickstart);
-    return mover.process_gcode(gcode, true);
-}
-
-// The span of `out` from the "; PAINT_FAN S100" zone-entry comment up to (excluding) the next "; PAINT_FAN"
-// comment (the zone's exit). Nothing painted should ever contain a bare M106/M107/M127 fan command in there.
-std::string zone_span_after_entry(const std::string &out) {
-    const size_t entry = out.find("; PAINT_FAN S100");
-    REQUIRE(entry != std::string::npos);
-    const size_t next = out.find("; PAINT_FAN", entry + 1);
-    REQUIRE(next != std::string::npos);
-    return out.substr(entry, next - entry);
-}
-
-} // namespace
-
 TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_seconds_delay=0)", "[fan_paint][FanMover]") {
     // M106 S255 is a >10% jump from the initial 0 speed: with nb_seconds_delay<=0 and kickstart>0 this arms
     // m_current_kickstart (FanMover.cpp), which only finishes counting down a couple of G1 moves later --
     // after the gcode has already entered the painted zone below.
-    const std::string out = move_fans_with_kickstart(
+    const std::string out = move_fans(
         "G1 X0 Y0 F600\n"
         "G1 X5 Y0 E1\n"
         "M106 S255\n"
@@ -276,14 +275,14 @@ TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_s
         "G1 X40 Y0 E5\n",
         /*nb_seconds_delay=*/0.0f, /*kickstart=*/0.5f);
     INFO(out);
-    CHECK(zone_span_after_entry(out).find("M106") == std::string::npos);
+    CHECK(zone_span_after_entry(out, "; PAINT_FAN S100").find("M106") == std::string::npos);
 }
 
 TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_seconds_delay=1)", "[fan_paint][FanMover]") {
     // Same shape, but nb_seconds_delay>0 so the kickstart is armed through the other branch of the M106
     // handling (the "move it earlier" path, which falls back to m_current_kickstart when it can't splice the
     // kickstart command directly into the not-yet-full buffer).
-    const std::string out = move_fans_with_kickstart(
+    const std::string out = move_fans(
         "G1 X0 Y0 F600\n"
         "G1 X2 Y0 E1\n"
         "M106 S255\n"
@@ -295,13 +294,58 @@ TEST_CASE("FanMover disarms an in-flight kickstart at a painted zone entry (nb_s
         "G1 X40 Y0 E5\n",
         /*nb_seconds_delay=*/1.0f, /*kickstart=*/0.5f);
     INFO(out);
-    CHECK(zone_span_after_entry(out).find("M106") == std::string::npos);
+    CHECK(zone_span_after_entry(out, "; PAINT_FAN S100").find("M106") == std::string::npos);
 }
 
 TEST_CASE("FanMover still leaves the fan command right after a painted zone exit in place when kickstart is enabled", "[fan_paint][FanMover]") {
-    const std::string out = move_fans_with_kickstart(
+    const std::string out = move_fans(
         "G1 X0 Y0 F600\nG1 X10 Y0 E1\n; PAINT_FAN END\nM106 S51\nG1 X20 Y0 E2\nG1 X30 Y0 E3\n",
         /*nb_seconds_delay=*/1.0f, /*kickstart=*/0.5f);
     INFO(out);
     CHECK(out.find("; PAINT_FAN END\nM106 S51\nG1 X20 Y0 E2\n") != std::string::npos);
+}
+
+TEST_CASE("FanMover writes the pending kickstart target before a painted zone entry instead of dropping it (nb_seconds_delay=0)", "[fan_paint][FanMover]") {
+    // M106 S51 (20%) then M106 S204 (80%, a >10% jump) arms a kickstart for the 80% target via the
+    // nb_seconds_delay<=0 branch. Before its countdown reaches zero, the zone entry comment arrives with the
+    // SAME target speed (80%) as already "in effect" per FanMover's bookkeeping (m_front_buffer_fan_speed),
+    // so C4 writes no fan command after it -- the target command must be written just before the barrier
+    // instead, or the G-code is left stuck at the M106 S255 boost pulse forever.
+    const std::string out = move_fans(
+        "G1 X0 Y0 F600\n"
+        "G1 X5 Y0 E1\n"
+        "M106 S51\n"
+        "M106 S204\n"
+        "G1 X7 Y0 E2\n"
+        "; PAINT_FAN S80\n"
+        "G1 X20 Y0 E3\n"
+        "G1 X30 Y0 E4\n"
+        "; PAINT_FAN END\n"
+        "G1 X40 Y0 E5\n",
+        /*nb_seconds_delay=*/0.0f, /*kickstart=*/0.5f);
+    INFO(out);
+    CHECK(last_fan_command_before(out, "; PAINT_FAN S80") == "M106 S204");
+    CHECK(zone_span_after_entry(out, "; PAINT_FAN S80").find("M106") == std::string::npos);
+}
+
+TEST_CASE("FanMover writes the pending kickstart target before a painted zone entry instead of dropping it (nb_seconds_delay=1)", "[fan_paint][FanMover]") {
+    // Same shape, but nb_seconds_delay>0 (the other kickstart-arming branch). The move between M106 S204 and
+    // the zone entry is short (0.05 s) -- long enough to not itself exceed the remaining kickstart duration
+    // (which would let the *unmodified* countdown below finish the injection on its own, one line early, and
+    // mask the bug) but short enough that the kickstart is still armed exactly when the barrier is reached.
+    const std::string out = move_fans(
+        "G1 X0 Y0 F600\n"
+        "G1 X2 Y0 E1\n"
+        "M106 S51\n"
+        "M106 S204\n"
+        "G1 X2.5 Y0 E1.05\n"
+        "; PAINT_FAN S80\n"
+        "G1 X20 Y0 E3\n"
+        "G1 X30 Y0 E4\n"
+        "; PAINT_FAN END\n"
+        "G1 X40 Y0 E5\n",
+        /*nb_seconds_delay=*/1.0f, /*kickstart=*/0.5f);
+    INFO(out);
+    CHECK(last_fan_command_before(out, "; PAINT_FAN S80") == "M106 S204");
+    CHECK(zone_span_after_entry(out, "; PAINT_FAN S80").find("M106") == std::string::npos);
 }
