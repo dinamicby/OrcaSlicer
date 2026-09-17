@@ -4,6 +4,7 @@
 #include "libslic3r.h"
 #include "BoundingBox.hpp"
 #include "ExPolygon.hpp"
+#include "FanPaint.hpp"
 #include "GCodeWriter.hpp"
 #include "Layer.hpp"
 #include "Point.hpp"
@@ -526,6 +527,8 @@ private:
     std::string _encode_label_ids_to_base64(std::vector<size_t> ids);
     // ORCA: Add support for role based fan speed control
     std::array<bool, ExtrusionRole::erCount> m_is_role_based_fan_on;
+    // Protype fan paint: painted runs marked so far, reported once at the end of the G-code.
+    size_t                              m_fan_paint_marked { 0 };
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
     bool                                m_enable_extrusion_role_markers;

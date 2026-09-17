@@ -1916,6 +1916,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     m_max_layer_z  = 0.f;
     m_last_width = 0.f;
     m_is_role_based_fan_on.fill(false);
+    m_fan_paint_marked = 0;
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
@@ -2761,6 +2762,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     // adds tags for time estimators
     file.write_format(";%s\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Last_Line_M73_Placeholder).c_str());
     file.write_format("; EXECUTABLE_BLOCK_END\n\n");
+
+    // Protype fan paint: one diagnostics line when some object carries fan paint.
+    {
+        bool   has_fan_paint   = false;
+        size_t fan_paint_zones = 0;
+        for (const PrintObject *object : print.objects()) {
+            has_fan_paint = has_fan_paint || object->has_fan_paint();
+            fan_paint_zones += object->fan_paint_zone_count();
+        }
+        if (has_fan_paint)
+            file.write(fan_paint_summary_line(fan_paint_zones, m_fan_paint_marked));
+    }
 
     print.throw_if_canceled();
 

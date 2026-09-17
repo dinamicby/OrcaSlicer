@@ -8,6 +8,7 @@
 #include "BoundingBox.hpp"
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
+#include "FanPaint.hpp"
 #include "Point.hpp"
 #include "Slicing.hpp"
 #include "TriangleMeshSlicer.hpp"
@@ -447,6 +448,17 @@ public:
     // Helpers to project custom facets on slices
     void project_and_append_custom_facets(bool seam, EnforcerBlockerType type, std::vector<Polygons>& expolys, std::vector<std::pair<Vec3f,Vec3f>>* vertical_points=nullptr) const;
 
+    // Protype fan paint. Facet values: one vector per entry of model_object()->volumes (empty for volumes that are
+    // not model parts) with the encoded value (FanPaint.hpp) of every facet, in its.indices order of the loaded mesh.
+    // Bands: Z ranges of the object painted whole. Zones are built from both at the end of Print::process().
+    void                        set_fan_paint_facets(std::vector<std::vector<uint8_t>> facet_values_per_volume);
+    void                        set_fan_paint_bands(std::vector<FanPaintBand> bands);
+    bool                        has_fan_paint() const;
+    // Zones of `layer` (one of this object's layers), nullptr when it has none.
+    const FanPaintZones*        fan_paint_zones(const Layer &layer) const;
+    // Zones over all layers, for the diagnostics line.
+    size_t                      fan_paint_zone_count() const;
+
     //BBS
     BoundingBox get_first_layer_bbox(float& area, float& layer_height, std::string& name);
     void         get_certain_layers(float start, float end, std::vector<LayerPtrs> &out, std::vector<BoundingBox> &boundingbox_objects);
@@ -498,6 +510,8 @@ private:
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
+    // Protype fan paint: m_fan_paint_zones from m_fan_paint_facets and m_fan_paint_bands, one entry per layer.
+    void generate_fan_paint_zones();
 
     void slice_volumes();
     //BBS
@@ -560,6 +574,11 @@ private:
     ExtrusionEntityCollection               m_skirt;
 
     PrintObject*                            m_shared_object{ nullptr };
+
+    // Protype fan paint inputs, and the zones built from them (parallel to m_layers).
+    std::vector<std::vector<uint8_t>>       m_fan_paint_facets;
+    std::vector<FanPaintBand>               m_fan_paint_bands;
+    std::vector<FanPaintZones>              m_fan_paint_zones;
 
     
     // SoftFever

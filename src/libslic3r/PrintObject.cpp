@@ -22,6 +22,7 @@
 #include "format.hpp"
 
 #include <float.h>
+#include <map>
 #include <oneapi/tbb/blocked_range.h>
 #include <oneapi/tbb/concurrent_vector.h>
 #include <oneapi/tbb/parallel_for.h>
@@ -4226,6 +4227,106 @@ void PrintObject::project_and_append_custom_facets(
                 }
             }
         }
+}
+
+void PrintObject::set_fan_paint_facets(std::vector<std::vector<uint8_t>> facet_values_per_volume)
+{
+    m_fan_paint_facets = std::move(facet_values_per_volume);
+}
+
+void PrintObject::set_fan_paint_bands(std::vector<FanPaintBand> bands)
+{
+    m_fan_paint_bands = std::move(bands);
+}
+
+bool PrintObject::has_fan_paint() const
+{
+    return ! m_fan_paint_bands.empty() ||
+        std::any_of(m_fan_paint_facets.begin(), m_fan_paint_facets.end(), [](const std::vector<uint8_t> &values) {
+            return std::any_of(values.begin(), values.end(), [](uint8_t value) { return value != 0; });
+        });
+}
+
+const FanPaintZones* PrintObject::fan_paint_zones(const Layer &layer) const
+{
+    if (m_layers.empty() || m_fan_paint_zones.size() != m_layers.size() || layer.id() < m_layers.front()->id())
+        return nullptr;
+    const size_t idx = layer.id() - m_layers.front()->id();
+    if (idx >= m_layers.size() || m_layers[idx] != &layer || m_fan_paint_zones[idx].empty())
+        return nullptr;
+    return &m_fan_paint_zones[idx];
+}
+
+size_t PrintObject::fan_paint_zone_count() const
+{
+    size_t count = 0;
+    for (const FanPaintZones &zones : m_fan_paint_zones)
+        count += zones.size();
+    return count;
+}
+
+// How far a painted-facet projection on `layer` is widened: across the walls of its regions, so a zone painted on a
+// vertical face (which projects to a line) covers the outer wall and every inner wall behind it.
+static coord_t fan_paint_wall_expansion(const Layer &layer)
+{
+    coord_t expansion = 0;
+    for (const LayerRegion *layerm : layer.regions()) {
+        const int    wall_loops = std::max(layerm->region().config().wall_loops.value, 1);
+        const double width      = layerm->flow(frExternalPerimeter).width() + (wall_loops - 1) * layerm->flow(frPerimeter).width();
+        expansion = std::max(expansion, coord_t(scale_(width)));
+    }
+    return expansion;
+}
+
+void PrintObject::generate_fan_paint_zones()
+{
+    m_fan_paint_zones.assign(m_layers.size(), FanPaintZones());
+    if (m_layers.empty() || ! this->has_fan_paint())
+        return;
+
+    // Painted facets of every encoded value, projected onto the layers they cross.
+    std::map<uint8_t, std::vector<Polygons>> projected;
+    const ModelVolumePtrs &volumes = this->model_object()->volumes;
+    for (size_t volume_idx = 0; volume_idx < volumes.size() && volume_idx < m_fan_paint_facets.size(); ++ volume_idx) {
+        const ModelVolume          &volume = *volumes[volume_idx];
+        const std::vector<uint8_t> &values = m_fan_paint_facets[volume_idx];
+        if (! volume.is_model_part() || values.empty())
+            continue;
+        const indexed_triangle_set &its = volume.mesh().its;
+        if (values.size() != its.indices.size()) {
+            BOOST_LOG_TRIVIAL(warning) << "fan paint: volume " << volume_idx << " has " << its.indices.size()
+                                       << " facets but " << values.size() << " painted values, skipping it";
+            continue;
+        }
+        std::map<uint8_t, std::vector<stl_triangle_vertex_indices>> indices_by_value;
+        for (size_t facet_idx = 0; facet_idx < values.size(); ++ facet_idx)
+            if (values[facet_idx] != 0)
+                indices_by_value[values[facet_idx]].push_back(its.indices[facet_idx]);
+        indexed_triangle_set painted;
+        painted.vertices = its.vertices;
+        const Transform3f trafo = (this->trafo_centered() * volume.get_matrix()).cast<float>();
+        for (auto &[value, indices] : indices_by_value) {
+            painted.indices = std::move(indices);
+            project_triangles_to_slabs(std::as_const(*this).layers(), painted, trafo, true, projected[value]);
+        }
+    }
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, m_layers.size()),
+        [this, &projected](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                m_print->throw_if_canceled();
+                const Layer &layer = *m_layers[layer_idx];
+                std::vector<std::pair<uint8_t, Polygons>> projections;
+                for (const auto &[value, per_layer] : projected)
+                    if (layer_idx < per_layer.size() && ! per_layer[layer_idx].empty())
+                        projections.emplace_back(value, per_layer[layer_idx]);
+                std::vector<std::pair<uint8_t, ExPolygons>> bands;
+                for (const FanPaintBand &band : m_fan_paint_bands)
+                    if (fan_paint_band_covers_layer(band, layer.slice_z))
+                        bands.emplace_back(band.value, layer.lslices);
+                m_fan_paint_zones[layer_idx] = build_fan_paint_layer_zones(projections, bands, fan_paint_wall_expansion(layer));
+            }
+        });
 }
 
 const Layer* PrintObject::get_layer_at_printz(coordf_t print_z) const {

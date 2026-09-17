@@ -2206,6 +2206,10 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         }
     }
 
+    // Protype fan paint: zones read the final layers and region flows of every object, shared or not.
+    for (PrintObject *obj : m_objects)
+        obj->generate_fan_paint_zones();
+
     BOOST_LOG_TRIVIAL(info) << "Slicing process finished." << log_memory_info();
 }
 
