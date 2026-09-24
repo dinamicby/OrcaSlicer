@@ -201,8 +201,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallInfillOrder)
 static t_config_enum_values s_keys_map_WallSequence {
     { "inner wall/outer wall",     int(WallSequence::InnerOuter) },
     { "outer wall/inner wall",     int(WallSequence::OuterInner) },
-    { "inner-outer-inner wall",    int(WallSequence::InnerOuterInner)}
-
+    { "inner-outer-inner wall",    int(WallSequence::InnerOuterInner)},
+    { "auto",                      int(WallSequence::Auto) }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(WallSequence)
 
@@ -1754,16 +1754,35 @@ void PrintConfigDef::init_fff_params()
                      "then the external perimeter and, finally, the first internal perimeter. "
                      "This option is recommended against the Outer/Inner option in most cases.\n\n"
                      "Use Outer/Inner for the same external wall quality and dimensional accuracy benefits of Inner/Outer/Inner option. "
-                     "However, the z seams will appear less consistent as the first extrusion of a new layer starts on a visible surface.\n\n ");
+                     "However, the z seams will appear less consistent as the first extrusion of a new layer starts on a visible surface.\n\n"
+                     "Use Auto to let every wall choose on every layer: a wall whose outer edge hangs past the layer below by more than the "
+                     "Auto order overhang threshold is printed Inner/Outer together with the inner walls behind it, every other wall Outer/Inner. "
+                     "The precise wall option is ignored with Auto.\n\n ");
     def->enum_keys_map = &ConfigOptionEnum<WallSequence>::get_enum_values();
     def->enum_values.push_back("inner wall/outer wall");
     def->enum_values.push_back("outer wall/inner wall");
     def->enum_values.push_back("inner-outer-inner wall");
+    def->enum_values.push_back("auto");
     def->enum_labels.push_back(L("Inner/Outer"));
     def->enum_labels.push_back(L("Outer/Inner"));
     def->enum_labels.push_back(L("Inner/Outer/Inner"));
+    def->enum_labels.push_back(L("Auto"));
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<WallSequence>(WallSequence::InnerOuter));
+
+    def = this->add("wall_sequence_auto_threshold", coFloatOrPercent);
+    def->label = L("Auto order overhang threshold");
+    def->category = L("Quality");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Used when the walls printing order is Auto. On each layer, a wall whose outer edge hangs past the layer below "
+                     "by more than this value is printed inner walls first, together with the inner walls behind it; "
+                     "every other wall is printed outer wall first. Can be a % of the outer wall line width.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "outer_wall_line_width";
+    def->min = 0;
+    def->max_literal = 20;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
 
     def = this->add("is_infill_first",coBool);
     def->label    = L("Print infill first");

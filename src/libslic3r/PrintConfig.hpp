@@ -100,6 +100,9 @@ enum class WallSequence {
     InnerOuter,
     OuterInner,
     InnerOuterInner,
+    // Orca: per wall stack and per layer - inner walls first where the external wall overhangs,
+    // outer wall first everywhere else.
+    Auto,
     Count,
 };
 
@@ -1106,6 +1109,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,       overhang_reverse_threshold))
     ((ConfigOptionEnum<CounterboreHoleBridgingOption>, counterbore_hole_bridging))
     ((ConfigOptionEnum<WallSequence>,  wall_sequence))
+    ((ConfigOptionFloatOrPercent,      wall_sequence_auto_threshold))
     ((ConfigOptionBool,                is_infill_first))
     ((ConfigOptionBool,                small_area_infill_flow_compensation))
     ((ConfigOptionEnum<WallDirection>,  wall_direction))
