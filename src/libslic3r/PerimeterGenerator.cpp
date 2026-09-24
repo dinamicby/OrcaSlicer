@@ -2164,8 +2164,22 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 // Protype: Auto wall sequence for Arachne. `constraints` come from getRegionOrder(outer_to_inner = true), so a
 // pair of even lines always runs from a wall to the next wall inside it. The stack behind an overhanging
 // external wall is every even line reachable inward through those pairs; its pairs are flipped so the stack
-// prints inner walls first. Unflipped pairs only lead inward and flipped ones only lead outward within the
-// stack, so no cycle can appear. Pairs with an odd line keep it after its neighbours.
+// prints inner walls first.
+//
+// Acyclicity: the mark (in_overhanging_stack) spreads along exactly the pairs that go on to get flipped, so a
+// marked `before` always has a marked `after` too - the marked set is closed inward. Within it, flipped pairs
+// point only outward (`after` -> `before`) and pairs with an unmarked `before` still point only inward
+// (`before` -> `after`); nothing ever points from a marked line to an unmarked one. So the combined order
+// can't cycle. That invariant is load-bearing: process_arachne()'s greedy loop below only terminates cleanly
+// along an acyclic order - a cycle would leave those lines permanently blocked, and the loop's "nothing left
+// to pick" fallback would silently print some other line a second time while dropping the blocked ones from
+// the G-code entirely.
+//
+// getRegionOrder pairs lines by geometry alone, so where a contour stack and a hole stack share a stitched
+// inner line, marking that shared line can spread the flip into the other stack's deeper walls too. The
+// other stack's own external wall still prints before its neighbour, though: the pair between them keeps its
+// unmarked `before`, and a pair is never flipped unless its `before` is marked. Pairs with an odd line keep
+// it after its neighbours.
 static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(const PerimeterGenerator                     &perimeter_generator,
                                                                            const Arachne::WallToolPaths::ExtrusionLineSet &constraints,
                                                                            const std::vector<Arachne::ExtrusionLine *>    &extrusions)
@@ -2180,11 +2194,7 @@ static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(con
     for (const Arachne::ExtrusionLine *line : extrusions) {
         if (line->inset_idx != 0 || line->is_odd || line->junctions.size() < 2)
             continue;
-        Polyline centerline;
-        centerline.points.reserve(line->junctions.size());
-        for (const Arachne::ExtrusionJunction &junction : line->junctions)
-            centerline.points.emplace_back(junction.p);
-        if (auto_wall_sequence_overhangs(perimeter_generator, Polylines{std::move(centerline)}) &&
+        if (auto_wall_sequence_overhangs(perimeter_generator, Polylines{Polyline(Arachne::to_points(*line))}) &&
             in_overhanging_stack.insert(line).second)
             to_visit.emplace_back(line);
     }
