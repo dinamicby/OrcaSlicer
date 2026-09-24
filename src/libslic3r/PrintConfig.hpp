@@ -100,7 +100,7 @@ enum class WallSequence {
     InnerOuter,
     OuterInner,
     InnerOuterInner,
-    // Orca: per wall stack and per layer - inner walls first where the external wall overhangs,
+    // Protype: per wall stack and per layer - inner walls first where the external wall overhangs,
     // outer wall first everywhere else.
     Auto,
     Count,
