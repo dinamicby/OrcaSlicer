@@ -2184,11 +2184,6 @@ static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(con
                                                                            const Arachne::WallToolPaths::ExtrusionLineSet &constraints,
                                                                            const std::vector<Arachne::ExtrusionLine *>    &extrusions)
 {
-    std::unordered_multimap<const Arachne::ExtrusionLine *, const Arachne::ExtrusionLine *> inner_neighbours;
-    for (const auto &[outer, inner] : constraints)
-        if (!outer->is_odd && !inner->is_odd)
-            inner_neighbours.emplace(outer, inner);
-
     std::unordered_set<const Arachne::ExtrusionLine *> in_overhanging_stack;
     std::vector<const Arachne::ExtrusionLine *>        to_visit;
     for (const Arachne::ExtrusionLine *line : extrusions) {
@@ -2198,6 +2193,16 @@ static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(con
             in_overhanging_stack.insert(line).second)
             to_visit.emplace_back(line);
     }
+    // No overhanging seed anywhere on this layer: nothing to flip, so every pair below would keep its
+    // `before` unchanged. Skip building the neighbour multimap and return the constraints as they are.
+    if (to_visit.empty())
+        return constraints;
+
+    std::unordered_multimap<const Arachne::ExtrusionLine *, const Arachne::ExtrusionLine *> inner_neighbours;
+    for (const auto &[outer, inner] : constraints)
+        if (!outer->is_odd && !inner->is_odd)
+            inner_neighbours.emplace(outer, inner);
+
     while (!to_visit.empty()) {
         const Arachne::ExtrusionLine *line = to_visit.back();
         to_visit.pop_back();

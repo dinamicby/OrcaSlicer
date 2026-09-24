@@ -1776,7 +1776,8 @@ void PrintConfigDef::init_fff_params()
     // xgettext:no-c-format, no-boost-format
     def->tooltip = L("Used when the walls printing order is Auto. On each layer, a wall whose outer edge hangs past the layer below "
                      "by more than this value is printed inner walls first, together with the inner walls behind it; "
-                     "every other wall is printed outer wall first. Can be a % of the outer wall line width.");
+                     "every other wall is printed outer wall first. Can be a % of the outer wall line width. "
+                     "Values below 0.01 mm count as 0.01 mm, and an overhang shorter than two outer wall line widths is ignored.");
     def->sidetext = L("mm or %");
     def->ratio_over = "outer_wall_line_width";
     def->min = 0;
