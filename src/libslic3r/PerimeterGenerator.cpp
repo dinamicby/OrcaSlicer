@@ -2156,6 +2156,49 @@ void bringContoursToFront(std::vector<PerimeterGeneratorArachneExtrusion>& order
 // ORCA:
 // Inner Outer Inner wall ordering mode perimeter order optimisation functions ended
 
+// Protype: Auto wall sequence for Arachne. `constraints` come from getRegionOrder(outer_to_inner = true), so a
+// pair of even lines always runs from a wall to the next wall inside it. The stack behind an overhanging
+// external wall is every even line reachable inward through those pairs; its pairs are flipped so the stack
+// prints inner walls first. Unflipped pairs only lead inward and flipped ones only lead outward within the
+// stack, so no cycle can appear. Pairs with an odd line keep it after its neighbours.
+static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(const PerimeterGenerator                     &perimeter_generator,
+                                                                           const Arachne::WallToolPaths::ExtrusionLineSet &constraints,
+                                                                           const std::vector<Arachne::ExtrusionLine *>    &extrusions)
+{
+    std::unordered_multimap<const Arachne::ExtrusionLine *, const Arachne::ExtrusionLine *> inner_neighbours;
+    for (const auto &[outer, inner] : constraints)
+        if (!outer->is_odd && !inner->is_odd)
+            inner_neighbours.emplace(outer, inner);
+
+    std::unordered_set<const Arachne::ExtrusionLine *> in_overhanging_stack;
+    std::vector<const Arachne::ExtrusionLine *>        to_visit;
+    for (const Arachne::ExtrusionLine *line : extrusions) {
+        if (line->inset_idx != 0 || line->is_odd || line->junctions.size() < 2)
+            continue;
+        Polyline centerline;
+        centerline.points.reserve(line->junctions.size());
+        for (const Arachne::ExtrusionJunction &junction : line->junctions)
+            centerline.points.emplace_back(junction.p);
+        if (auto_wall_sequence_overhangs(perimeter_generator, Polylines{std::move(centerline)}) &&
+            in_overhanging_stack.insert(line).second)
+            to_visit.emplace_back(line);
+    }
+    while (!to_visit.empty()) {
+        const Arachne::ExtrusionLine *line = to_visit.back();
+        to_visit.pop_back();
+        const auto [first, last] = inner_neighbours.equal_range(line);
+        for (auto it = first; it != last; ++it)
+            if (in_overhanging_stack.insert(it->second).second)
+                to_visit.emplace_back(it->second);
+    }
+
+    Arachne::WallToolPaths::ExtrusionLineSet flipped;
+    for (const auto &[before, after] : constraints) {
+        const bool flip = !before->is_odd && !after->is_odd && in_overhanging_stack.count(before) > 0;
+        flipped.emplace(flip ? std::make_pair(after, before) : std::make_pair(before, after));
+    }
+    return flipped;
+}
 
 // Thanks, Cura developers, for implementing an algorithm for generating perimeters with variable width (Arachne) that is based on the paper
 // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling"
@@ -2347,6 +2390,11 @@ void PerimeterGenerator::process_arachne()
         	is_outer_wall_first =
             	this->config->wall_sequence == WallSequence::OuterInner;
         }
+        // Protype: Auto starts from outer wall first everywhere and flips the stacks behind overhanging
+        // external walls once the order constraints are known (flip_overhanging_wall_stacks()).
+        const bool is_auto_wall_sequence = this->config->wall_sequence == WallSequence::Auto;
+        if (is_auto_wall_sequence)
+            is_outer_wall_first = true;
         if (is_outer_wall_first) {
             start_perimeter = 0;
             end_perimeter = int(perimeters.size());
@@ -2369,6 +2417,8 @@ void PerimeterGenerator::process_arachne()
             map_extrusion_to_idx.emplace(all_extrusions[idx], idx);
 
         auto extrusions_constrains = Arachne::WallToolPaths::getRegionOrder(all_extrusions, is_outer_wall_first);
+        if (is_auto_wall_sequence)
+            extrusions_constrains = flip_overhanging_wall_stacks(*this, extrusions_constrains, all_extrusions);
         for (auto [before, after] : extrusions_constrains) {
             auto after_it = map_extrusion_to_idx.find(after);
             ++blocked[after_it->second];
