@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cassert>
 #include <unordered_set>
+#include <unordered_map>
 #include <thread>
 #include "libslic3r/AABBTreeLines.hpp"
 #include "Print.hpp"
@@ -25,6 +26,9 @@ static const double narrow_loop_length_threshold = 10;
 //ext_perimeter_width + ext_perimeter_spacing  * (1 - SMALLER_EXT_INSET_OVERLAP_TOLERANCE),
 //we think it's small detail area and will generate smaller line width for it
 static constexpr double SMALLER_EXT_INSET_OVERLAP_TOLERANCE = 0.22;
+// Orca: Auto wall sequence ignores overhangs shorter than this many outer wall line widths, so
+// mesh noise does not flip a whole wall stack.
+static constexpr double AUTO_WALL_SEQUENCE_MIN_OVERHANG_WIDTHS = 2.;
 
 namespace Slic3r {
     
@@ -43,7 +47,9 @@ public:
     unsigned short                      depth;
     // Children contour, may be both CCW and CW oriented (outer contours or holes).
     std::vector<PerimeterGeneratorLoop> children;
-    
+    // Orca: set by mark_auto_wall_sequence() - this loop's wall stack prints its external wall first.
+    bool                                outer_first = false;
+
     PerimeterGeneratorLoop(const Polygon &polygon, unsigned short depth, bool is_contour, bool is_small_width_perimeter = false) :
         polygon(polygon), is_contour(is_contour), is_smaller_width_perimeter(is_small_width_perimeter), depth(depth) {}
     // External perimeter. It may be CCW or CW oriented (outer contour or hole contour).
@@ -95,6 +101,68 @@ static bool detect_steep_overhang(const PrintRegionConfig *config,
     }
 
     return false;
+}
+
+// Orca: Auto wall sequence. An external wall overhangs when its outer edge hangs past the layer below
+// by more than wall_sequence_auto_threshold along at least AUTO_WALL_SEQUENCE_MIN_OVERHANG_WIDTHS outer
+// wall line widths. Same geometry as detect_steep_overhang(): the centerline is tested against the lower
+// slices grown by threshold - width / 2. The first object layer has nothing below it to compare with.
+static bool auto_wall_sequence_overhangs(const PerimeterGenerator &perimeter_generator, const Polylines &centerline)
+{
+    if (perimeter_generator.lower_slices == nullptr || centerline.empty() ||
+        perimeter_generator.layer_id <= raft_and_underlay_layers(*perimeter_generator.object_config))
+        return false;
+
+    const double width     = perimeter_generator.ext_perimeter_flow.width();
+    const double threshold = perimeter_generator.config->wall_sequence_auto_threshold.get_abs_value(width);
+    BoundingBox  bbox      = get_extents(centerline);
+    bbox.offset(scale_(threshold + width));
+    const Polygons lower = ClipperUtils::clip_clipper_polygons_with_subject_bbox(*perimeter_generator.lower_slices, bbox, true);
+    const Polygons limit = offset(lower, float(scale_(threshold - 0.5 * width)));
+
+    double overhang_length = 0.;
+    for (const Polyline &piece : diff_pl(centerline, limit))
+        overhang_length += piece.length();
+    return overhang_length >= scale_(AUTO_WALL_SEQUENCE_MIN_OVERHANG_WIDTHS * width);
+}
+
+// Orca: Auto wall sequence for the classic generator. A hole's stack runs from its external loop, a leaf of
+// the hole tree, down to the deepest hole loop; the children of a hole are holes (see the nesting in
+// process_classic()). Returns whether this hole subtree has an overhanging external wall.
+static bool mark_auto_hole_stack(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoop &hole)
+{
+    bool overhangs = hole.is_external() &&
+                     auto_wall_sequence_overhangs(perimeter_generator, Polylines{hole.polygon.split_at_first_point()});
+    for (PerimeterGeneratorLoop &child : hole.children)
+        overhangs = mark_auto_hole_stack(perimeter_generator, child) || overhangs;
+    hole.outer_first = !overhangs;
+    return overhangs;
+}
+
+// A contour's stack is its external loop plus the contour loops nested inside it; holes inside start
+// stacks of their own.
+static void mark_auto_contour_stack(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoop &contour, bool overhangs)
+{
+    contour.outer_first = !overhangs;
+    for (PerimeterGeneratorLoop &child : contour.children) {
+        if (child.is_contour)
+            mark_auto_contour_stack(perimeter_generator, child, overhangs);
+        else
+            mark_auto_hole_stack(perimeter_generator, child);
+    }
+}
+
+static void mark_auto_wall_sequence(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoops &loops)
+{
+    for (PerimeterGeneratorLoop &loop : loops) {
+        if (!loop.is_contour) {
+            mark_auto_hole_stack(perimeter_generator, loop);
+            continue;
+        }
+        const bool overhangs = loop.is_external() &&
+                               auto_wall_sequence_overhangs(perimeter_generator, Polylines{loop.polygon.split_at_first_point()});
+        mark_auto_contour_stack(perimeter_generator, loop, overhangs);
+    }
 }
 
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
@@ -255,7 +323,9 @@ static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perime
 
             eloop->make_counter_clockwise();
             eloop->inset_idx = loop.depth;
-            if (loop.is_contour) {
+            // A contour's children lie inside it, a hole's children lie farther from the hole, so by
+            // default (outer_first == false) both print their inner walls first.
+            if (loop.is_contour != loop.outer_first) {
                 out.append(std::move(children.entities));
                 out.entities.emplace_back(eloop);
             } else {
@@ -1420,6 +1490,8 @@ void PerimeterGenerator::process_classic()
                 steep_overhang_contour = true;
                 steep_overhang_hole    = true;
             }
+            if (this->config->wall_sequence == WallSequence::Auto)
+                mark_auto_wall_sequence(*this, contours.front());
             ExtrusionEntityCollection entities = traverse_loops(*this, contours.front(), thin_walls, steep_overhang_contour, steep_overhang_hole);
             // All walls are counter-clockwise initially, so we don't need to reorient it if that's what we want
             if (wall_direction != WallDirection::CounterClockwise) {
@@ -1432,11 +1504,15 @@ void PerimeterGenerator::process_classic()
             // we continue inwards after having finished the brim
             // TODO: add test for perimeter order
             bool is_outer_wall_first = this->config->wall_sequence == WallSequence::OuterInner;
-            if (is_outer_wall_first ||
-                //BBS: always print outer wall first when there indeed has brim.
-                (this->layer_id == 0 &&
-                    this->object_config->brim_type == BrimType::btOuterOnly &&
-                    this->object_config->brim_width.value > 0))
+            // Orca: Auto has already ordered every wall stack in mark_auto_wall_sequence(); on the first
+            // layer nothing overhangs, so the brim rule below is met there too.
+            const bool is_auto_wall_sequence = this->config->wall_sequence == WallSequence::Auto;
+            if (!is_auto_wall_sequence &&
+                (is_outer_wall_first ||
+                 //BBS: always print outer wall first when there indeed has brim.
+                 (this->layer_id == 0 &&
+                     this->object_config->brim_type == BrimType::btOuterOnly &&
+                     this->object_config->brim_width.value > 0)))
                 entities.reverse();
             // Orca: sandwich mode. Apply after 1st layer.
             else if ((this->config->wall_sequence == WallSequence::InnerOuterInner) && layer_id > 0){
