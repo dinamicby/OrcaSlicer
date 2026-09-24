@@ -119,10 +119,13 @@ static bool auto_wall_sequence_overhangs(const PerimeterGenerator &perimeter_gen
     const double threshold = std::max(perimeter_generator.config->wall_sequence_auto_threshold.get_abs_value(width),
                                        AUTO_WALL_SEQUENCE_MIN_THRESHOLD_MM);
     BoundingBox  bbox      = get_extents(centerline);
-    bbox.offset(scale_(threshold + width));
-    // Real clipping (not get_entire_polygons): the bbox margin above (threshold + width) exceeds the
-    // offset below (threshold - width / 2), so an edge this clip introduces sits outside that offset
-    // and can never reach the centerline.
+    bbox.offset(scale_(threshold + width + DefaultMiterLimit * std::abs(threshold - 0.5 * width)));
+    // Real clipping (not get_entire_polygons): offset() below joins corners with a miter join capped at
+    // DefaultMiterLimit, so a corner this clip introduces can be pushed out by up to
+    // DefaultMiterLimit * |threshold - width / 2| beyond the plain offset distance (threshold - width / 2)
+    // once it goes through that offset. The bbox margin above (threshold + width + that miter term) covers
+    // the offset itself plus that worst-case miter spike, so the edge this clip introduces can never reach
+    // the centerline.
     const Polygons lower = ClipperUtils::clip_clipper_polygons_with_subject_bbox(*perimeter_generator.lower_slices, bbox);
     const Polygons limit = offset(lower, float(scale_(threshold - 0.5 * width)));
 
@@ -133,7 +136,9 @@ static bool auto_wall_sequence_overhangs(const PerimeterGenerator &perimeter_gen
 }
 
 // Protype: Whether loop's own wall overhangs - only an external loop (depth 0) can; an inner ring
-// answers false here and simply inherits its stack's flag from mark_auto_contour_stack().
+// answers false here and gets its flag elsewhere instead: a contour ring inherits its root contour's
+// decision in mark_auto_contour_stack(), a hole ring takes the OR over its own subtree in
+// mark_auto_hole_stack().
 static bool external_loop_overhangs(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoop &loop)
 {
     return loop.is_external() && auto_wall_sequence_overhangs(perimeter_generator, Polylines{loop.polygon.split_at_first_point()});
