@@ -4586,8 +4586,19 @@ void GCodeProcessor::run_post_process()
         }
     };
 
+    // Layer of the line being exported, counted from the same tag as in the processing pass; 0 before the first
+    // layer. m_layer_id cannot tell it here: once the processing pass is done it holds the layer count of the print.
+    unsigned int export_layer_id = 0;
+    const std::string layer_change_line = ";" + reserved_tag(ETags::Layer_Change);
+    auto is_layer_change = [&layer_change_line](const std::string& gcode_line) {
+        std::string_view line(gcode_line);
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+            line.remove_suffix(1);
+        return line == layer_change_line;
+    };
+
     // add lines M104 to exported gcode
-    auto process_line_T = [this, &export_lines](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
+    auto process_line_T = [this, &export_lines, &export_layer_id](const std::string& gcode_line, const size_t g1_lines_counter, const ExportLines::Backtrace& backtrace) {
         const std::string cmd = GCodeReader::GCodeLine::extract_cmd(gcode_line);
 
         int tool_number = -1;
@@ -4610,12 +4621,15 @@ void GCodeProcessor::run_post_process()
                     if (m_print != nullptr)
                         m_print->active_step_add_warning(PrintStateBase::WarningLevel::CRITICAL, warning);
                 }
+                // The tool selected by this line prints the layer the line belongs to, even when the preheat
+                // lands in the layer before it.
+                const bool is_first_layer = export_layer_id <= 1;
                 export_lines.insert_lines(
                     backtrace, cmd,
                     // line inserter
-                    [tool_number, this](unsigned int id, const std::vector<float>& time_diffs) {
-                        const int temperature = int(m_layer_id != 1 ? m_extruder_temps_config[tool_number] :
-                                                                    m_extruder_temps_first_layer_config[tool_number]);
+                    [tool_number, is_first_layer, this](unsigned int id, const std::vector<float>& time_diffs) {
+                        const int temperature = int(is_first_layer ? m_extruder_temps_first_layer_config[tool_number] :
+                                                                     m_extruder_temps_config[tool_number]);
                         // Orca: M104.1 for XL printers, I can't find the documentation for this so I copied the C++ comments from
                         // Prusa-Firmware-Buddy here
                         /**
@@ -4705,6 +4719,8 @@ void GCodeProcessor::run_post_process()
 
                 if (eol) {
                     ++line_id;
+                    if (is_layer_change(gcode_line))
+                        ++export_layer_id;
                     const unsigned int internal_g1_lines_counter = export_lines.update(gcode_line, line_id, g1_lines_counter);
                     // replace placeholder lines
                     bool processed = process_placeholders(gcode_line);
