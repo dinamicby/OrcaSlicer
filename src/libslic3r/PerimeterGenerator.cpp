@@ -51,6 +51,10 @@ public:
     std::vector<PerimeterGeneratorLoop> children;
     // Protype: set by mark_auto_wall_sequence() - this loop's wall stack prints its external wall first.
     bool                                outer_first = false;
+    // Protype: Auto wall sequence - whether this external loop's wall overhangs. Set once in process_classic() when
+    // the external loops are built (mark_auto_external_overhangs()); the print order (mark_auto_wall_sequence())
+    // and the precise gap (precise_outer_wall_strips()) both read it, so they can't disagree.
+    bool                                auto_overhangs = false;
 
     PerimeterGeneratorLoop(const Polygon &polygon, unsigned short depth, bool is_contour, bool is_small_width_perimeter = false) :
         polygon(polygon), is_contour(is_contour), is_smaller_width_perimeter(is_small_width_perimeter), depth(depth) {}
@@ -135,37 +139,45 @@ static bool auto_wall_sequence_overhangs(const PerimeterGenerator &perimeter_gen
     return overhang_length >= scale_(AUTO_WALL_SEQUENCE_MIN_OVERHANG_WIDTHS * width);
 }
 
+// Protype: Auto wall sequence for the classic generator - decide once, right after the external loops are built,
+// whether each of them overhangs.
+static void mark_auto_external_overhangs(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoops &loops)
+{
+    for (PerimeterGeneratorLoop &loop : loops)
+        loop.auto_overhangs = auto_wall_sequence_overhangs(perimeter_generator, Polylines{loop.polygon.split_at_first_point()});
+}
+
 // Protype: Whether loop's own wall overhangs - only an external loop (depth 0) can; an inner ring
 // answers false here and gets its flag elsewhere instead: a contour ring inherits its root contour's
 // decision in mark_auto_contour_stack(), a hole ring takes the OR over its own subtree in
 // mark_auto_hole_stack().
-static bool external_loop_overhangs(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoop &loop)
+static bool external_loop_overhangs(const PerimeterGeneratorLoop &loop)
 {
-    return loop.is_external() && auto_wall_sequence_overhangs(perimeter_generator, Polylines{loop.polygon.split_at_first_point()});
+    return loop.is_external() && loop.auto_overhangs;
 }
 
 // Protype: Auto wall sequence for the classic generator. A hole's stack runs from its external loop, a leaf of
 // the hole tree, down to the deepest hole loop; the children of a hole are holes (see the nesting in
 // process_classic()). Returns whether this hole subtree has an overhanging external wall.
-static bool mark_auto_hole_stack(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoop &hole)
+static bool mark_auto_hole_stack(PerimeterGeneratorLoop &hole)
 {
-    bool overhangs = external_loop_overhangs(perimeter_generator, hole);
+    bool overhangs = external_loop_overhangs(hole);
     for (PerimeterGeneratorLoop &child : hole.children)
-        overhangs = mark_auto_hole_stack(perimeter_generator, child) || overhangs;
+        overhangs = mark_auto_hole_stack(child) || overhangs;
     hole.outer_first = !overhangs;
     return overhangs;
 }
 
 // A contour's stack is its external loop plus the contour loops nested inside it; holes inside start
 // stacks of their own.
-static void mark_auto_contour_stack(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoop &contour, bool overhangs)
+static void mark_auto_contour_stack(PerimeterGeneratorLoop &contour, bool overhangs)
 {
     contour.outer_first = !overhangs;
     for (PerimeterGeneratorLoop &child : contour.children) {
         if (child.is_contour)
-            mark_auto_contour_stack(perimeter_generator, child, overhangs);
+            mark_auto_contour_stack(child, overhangs);
         else
-            mark_auto_hole_stack(perimeter_generator, child);
+            mark_auto_hole_stack(child);
     }
 }
 
@@ -173,12 +185,32 @@ static void mark_auto_contour_stack(const PerimeterGenerator &perimeter_generato
 // under the contour that contains it, so contours.front() holds only external contours - there is no
 // hole case to handle here; mark_auto_hole_stack() marks a hole's own stack once mark_auto_contour_stack()
 // reaches it as a child.
-static void mark_auto_wall_sequence(const PerimeterGenerator &perimeter_generator, PerimeterGeneratorLoops &loops)
+static void mark_auto_wall_sequence(PerimeterGeneratorLoops &loops)
 {
     for (PerimeterGeneratorLoop &contour : loops) {
         assert(contour.is_contour);
-        mark_auto_contour_stack(perimeter_generator, contour, external_loop_overhangs(perimeter_generator, contour));
+        mark_auto_contour_stack(contour, external_loop_overhangs(contour));
     }
+}
+
+// Protype: precise_outer_wall under Auto, classic generator. A stack printed inner walls first gets the InnerOuter
+// gap between its external loop and the next wall, `strip` wider than the overlapping one. The strip is taken along
+// the overhanging external loops only: the band within `strip` of the loop line on either side. Its half outside
+// the loop never holds material (outside a contour, inside a hole), and it follows the loops rather than the
+// boundaries of `last`, so splitting off top surfaces (only_one_wall_top) does not move it.
+static Polygons precise_outer_wall_strips(const PerimeterGeneratorLoops &contours, const PerimeterGeneratorLoops &holes, coord_t strip)
+{
+    Polygons strips;
+    for (const PerimeterGeneratorLoops *loops : {&contours, &holes})
+        for (const PerimeterGeneratorLoop &loop : *loops) {
+            if (!loop.auto_overhangs)
+                continue;
+            Polygon line = loop.polygon;
+            if (line.is_clockwise())
+                line.reverse();
+            append(strips, diff(offset(line, float(strip)), offset(line, -float(strip))));
+        }
+    return strips;
 }
 
 static ExtrusionEntityCollection traverse_loops(const PerimeterGenerator &perimeter_generator, const PerimeterGeneratorLoops &loops, ThickPolylines &thin_walls,
@@ -1220,7 +1252,11 @@ void PerimeterGenerator::process_classic()
         ext_perimeter_spacing2 = scaled<coord_t>(0.5f * (this->ext_perimeter_flow.width() + this->perimeter_flow.width()));
     else
         ext_perimeter_spacing2 = scaled<coord_t>(0.5f * (this->ext_perimeter_flow.spacing() + this->perimeter_flow.spacing()));
-    
+    // Protype: under Auto the precise wall applies to the stacks printed inner walls first (precise_outer_wall_strips()).
+    const bool    auto_precise_outer_wall  = config->precise_outer_wall && config->wall_sequence == WallSequence::Auto;
+    const coord_t precise_outer_wall_strip =
+        scaled<coord_t>(0.5f * (this->ext_perimeter_flow.width() + this->perimeter_flow.width())) - ext_perimeter_spacing2;
+
     // overhang perimeters
     m_mm3_per_mm_overhang      		= this->overhang_flow.mm3_per_mm();
     
@@ -1378,7 +1414,19 @@ void PerimeterGenerator::process_classic()
                     //BBS: For internal perimeter, we should "enable" thin wall strategy in which offset2 is used to
                     // remove too closed line, so that gap fill can be used for such internal narrow area in following
                     // handling.
-                    offsets = offset2_ex(last,
+                    // Protype: under Auto the first inner loop keeps the precise gap from the external loops
+                    // printed last - offset from `last` with their strips removed.
+                    ExPolygons precise_source;
+                    bool       use_precise_source = false;
+                    if (i == 1 && auto_precise_outer_wall) {
+                        const Polygons strips = precise_outer_wall_strips(contours[0], holes[0], precise_outer_wall_strip);
+                        if (!strips.empty()) {
+                            precise_source     = diff_ex(last, strips);
+                            use_precise_source = true;
+                        }
+                    }
+                    const ExPolygons &source = use_precise_source ? precise_source : last;
+                    offsets = offset2_ex(source,
                         -float(distance + min_spacing / 2. - 1.),
                         float(min_spacing / 2. - 1.));
                     // look for gaps
@@ -1387,7 +1435,7 @@ void PerimeterGenerator::process_classic()
                         // (but still long enough to escape the area threshold) that gap fill
                         // won't be able to fill but we'd still remove from infill area
                         append(gaps, diff_ex(
-                            offset(last,    - float(0.5 * distance)),
+                            offset(source,  - float(0.5 * distance)),
                             offset(offsets,   float(0.5 * distance + 10))));  // safety offset
                 }
                 if (offsets.empty() && offsets_with_smaller_width.empty()) {
@@ -1426,6 +1474,10 @@ void PerimeterGenerator::process_classic()
                                     holes[i].emplace_back(PerimeterGeneratorLoop(hole, i, false, true));
                             }
                         }
+                    }
+                    if (i == 0 && this->config->wall_sequence == WallSequence::Auto) {
+                        mark_auto_external_overhangs(*this, contours[0]);
+                        mark_auto_external_overhangs(*this, holes[0]);
                     }
                 }
 
@@ -1508,7 +1560,7 @@ void PerimeterGenerator::process_classic()
                 steep_overhang_hole    = true;
             }
             if (this->config->wall_sequence == WallSequence::Auto)
-                mark_auto_wall_sequence(*this, contours.front());
+                mark_auto_wall_sequence(contours.front());
             ExtrusionEntityCollection entities = traverse_loops(*this, contours.front(), thin_walls, steep_overhang_contour, steep_overhang_hole);
             // All walls are counter-clockwise initially, so we don't need to reorient it if that's what we want
             if (wall_direction != WallDirection::CounterClockwise) {
