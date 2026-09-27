@@ -2272,6 +2272,20 @@ static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(con
     return flipped;
 }
 
+// Protype: precise_outer_wall under Auto, Arachne. Arachne builds every wall of an island in one pass and moves the
+// external wall of the whole island at once (wall_0_inset), so the gap is decided per island: an island takes the
+// InnerOuter precise path when any of its external walls is going to overhang. The external wall's centreline lies
+// ext_perimeter_width / 2 inside the island on both paths, so it can be tested before the walls exist. Arachne's
+// own flip (flip_overhanging_wall_stacks()) still decides the order from the finished lines; where the two disagree
+// the island keeps the overlapping gap on that layer, as before.
+static bool auto_island_overhangs(const PerimeterGenerator &perimeter_generator, const Polygons &island)
+{
+    for (const Polygon &line : offset(island, -float(perimeter_generator.ext_perimeter_flow.scaled_width() / 2.)))
+        if (auto_wall_sequence_overhangs(perimeter_generator, Polylines{line.split_at_first_point()}))
+            return true;
+    return false;
+}
+
 // Thanks, Cura developers, for implementing an algorithm for generating perimeters with variable width (Arachne) that is based on the paper
 // "A framework for adaptive width control of dense contour-parallel toolpaths in fused deposition modeling"
 void PerimeterGenerator::process_arachne()
@@ -2327,9 +2341,13 @@ void PerimeterGenerator::process_arachne()
         if (is_topmost_layer && loop_number > 0 && config->only_one_wall_top)
             loop_number = 0;
         
-        auto apply_precise_outer_wall = config->precise_outer_wall && config->wall_sequence == WallSequence::InnerOuter;
+        const Polygons island = surface.expolygon.simplify_p(surface_simplify_resolution);
+        // Protype: under Auto the precise wall applies to islands with an overhanging external wall (auto_island_overhangs()).
+        const bool apply_precise_outer_wall = config->precise_outer_wall &&
+            (config->wall_sequence == WallSequence::InnerOuter ||
+             (config->wall_sequence == WallSequence::Auto && auto_island_overhangs(*this, island)));
         // Orca: properly adjust offset for the outer wall if precise_outer_wall is enabled.
-        ExPolygons last = offset_ex(surface.expolygon.simplify_p(surface_simplify_resolution),
+        ExPolygons last = offset_ex(island,
                        apply_precise_outer_wall? -float(ext_perimeter_width - ext_perimeter_spacing )
                                                  : -float(ext_perimeter_width / 2. - ext_perimeter_spacing / 2.));
         
