@@ -1758,7 +1758,8 @@ void PrintConfigDef::init_fff_params()
                      "However, the z seams will appear less consistent as the first extrusion of a new layer starts on a visible surface.\n\n"
                      "Use Auto to let every wall choose on every layer: a wall whose outer edge hangs past the layer below by more than the "
                      "Auto order overhang threshold is printed Inner/Outer together with the inner walls behind it, every other wall Outer/Inner. "
-                     "The precise wall option is ignored with Auto.\n\n ");
+                     "With the precise wall option on, the walls Auto prints Inner/Outer get the precise gap (Arachne: every "
+                     "island that has one).\n\n ");
     def->enum_keys_map = &ConfigOptionEnum<WallSequence>::get_enum_values();
     def->enum_values.push_back("inner wall/outer wall");
     def->enum_values.push_back("outer wall/inner wall");

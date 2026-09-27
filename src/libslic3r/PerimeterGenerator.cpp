@@ -53,7 +53,8 @@ public:
     bool                                outer_first = false;
     // Protype: Auto wall sequence - whether this external loop's wall overhangs. Set once in process_classic() when
     // the external loops are built (mark_auto_external_overhangs()); the print order (mark_auto_wall_sequence())
-    // and the precise gap (precise_outer_wall_strips()) both read it, so they can't disagree.
+    // and the precise gap (precise_outer_wall_strips()) both read it, so they start from one answer (where nesting
+    // still has the last word, see precise_outer_wall_strips()).
     bool                                auto_overhangs = false;
 
     PerimeterGeneratorLoop(const Polygon &polygon, unsigned short depth, bool is_contour, bool is_small_width_perimeter = false) :
@@ -198,6 +199,11 @@ static void mark_auto_wall_sequence(PerimeterGeneratorLoops &loops)
 // the overhanging external loops only: the band within `strip` of the loop line on either side. Its half outside
 // the loop never holds material (outside a contour, inside a hole), and it follows the loops rather than the
 // boundaries of `last`, so splitting off top surfaces (only_one_wall_top) does not move it.
+// Known limit: a hole whose first inner ring merges with a neighbour's - another hole's, or the contour's where the
+// hole sits within about one wall stack of the edge - has no stack of its own after nesting. Its place in the print
+// order then comes from its parent loop (a merged hole ring) or from chaining among a contour loop's children, not
+// from its own flag, so it can go down last at the overlapping gap, or first next to a strip; the latter is the
+// edge-to-edge contact Arachne's per-island precise path gives straight stacks anyway.
 static Polygons precise_outer_wall_strips(const PerimeterGeneratorLoops &contours, const PerimeterGeneratorLoops &holes, coord_t strip)
 {
     Polygons strips;
@@ -2276,8 +2282,9 @@ static Arachne::WallToolPaths::ExtrusionLineSet flip_overhanging_wall_stacks(con
 // external wall of the whole island at once (wall_0_inset), so the gap is decided per island: an island takes the
 // InnerOuter precise path when any of its external walls is going to overhang. The external wall's centreline lies
 // ext_perimeter_width / 2 inside the island on both paths, so it can be tested before the walls exist. Arachne's
-// own flip (flip_overhanging_wall_stacks()) still decides the order from the finished lines; where the two disagree
-// the island keeps the overlapping gap on that layer, as before.
+// own flip (flip_overhanging_wall_stacks()) still decides the order from the finished lines, and the two can
+// disagree either way: a flipped stack in an island this test missed keeps the overlapping gap, as before; an island
+// it flagged whose stacks all stay outer first gets the precise gap anyway, as straight stacks of a flagged island do.
 static bool auto_island_overhangs(const PerimeterGenerator &perimeter_generator, const Polygons &island)
 {
     for (const Polygon &line : offset(island, -float(perimeter_generator.ext_perimeter_flow.scaled_width() / 2.)))
