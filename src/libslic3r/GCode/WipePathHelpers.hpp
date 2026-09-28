@@ -12,18 +12,14 @@ namespace Slic3r {
 
 // Printed prefix of one region's perimeter sequence. Append each entity only
 // after extrusion; later walls and other regions cannot support an inward wipe.
-// Protype: the region's inner walls are also planned up front, in emission
-// order, so a loop printed before them can still tell its material side.
+// Protype: all inner walls of the region are also planned up front, so a loop
+// printed before its own inner walls can still tell its material side.
 struct WipeInwardSupport {
     Lines printed_lines;
     Lines inner_lines;
     Lines planned_inner_lines;
-    // Leading lines of planned_inner_lines that are already printed.
-    size_t printed_planned_inner = 0;
     void plan(const ExtrusionEntitiesPtr &perimeters);
     void append(const ExtrusionEntity &entity);
-    // Inner walls of the region not printed yet.
-    Lines pending_inner_lines() const;
 };
 
 namespace AABBTreeLines {

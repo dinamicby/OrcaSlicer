@@ -5242,8 +5242,7 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
         // context was created, so the effective setting is checked again here.
         if (EXTRUDER_CONFIG(wipe) && m_config.wipe_inward && m_config.wipe_inward_distance.value > 0. &&
             wipe_support != nullptr &&
-            (!wipe_support->inner_lines.empty() ||
-             wipe_support->printed_planned_inner < wipe_support->planned_inner_lines.size()) &&
+            !wipe_support->planned_inner_lines.empty() &&
             // A loop's role is its first path's role. An overhanging start must
             // not hide ordinary external-wall segments elsewhere in the loop.
             std::any_of(paths.begin(), paths.end(),
@@ -5266,11 +5265,14 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
                 const double support_distance = scale_(std::max(nozzle_diameter, outer_wall_line_width));
                 // Protype: Orca only takes the material side from inner walls printed before this loop. When the
                 // external wall comes first - Outer/Inner order, or a straight wall pack under "auto" - none is
-                // next to it, and the inner walls of this region printed right after it give the side instead.
-                // Support is still checked only against material already laid down: earlier walls and this loop.
-                const Lines pending_inner = wipe_support->pending_inner_lines();
-                for (const Lines *side_lines : {&wipe_support->inner_lines, &pending_inner}) {
-                    if (side_lines->empty())
+                // next to it, so a second attempt takes the side from every inner wall of this region, including
+                // those printed right after the loop. With all of them printed it would only repeat the first.
+                // The side comes from these walls alone: within a line width of this loop the support check
+                // below accepts either side of it.
+                const bool all_inner_printed =
+                    wipe_support->inner_lines.size() == wipe_support->planned_inner_lines.size();
+                for (const Lines *side_lines : {&wipe_support->inner_lines, &wipe_support->planned_inner_lines}) {
+                    if (side_lines->empty() || (side_lines == &wipe_support->planned_inner_lines && all_inner_printed))
                         continue;
                     Polyline inward_path = m_wipe.path;
                     if (offset_wipe_path_toward_support(

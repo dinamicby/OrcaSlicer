@@ -30,7 +30,6 @@ static bool is_inner_wall(const ExtrusionEntity &entity)
 void WipeInwardSupport::plan(const ExtrusionEntitiesPtr &perimeters)
 {
     planned_inner_lines.clear();
-    printed_planned_inner = 0;
     for (const ExtrusionEntity *entity : perimeters)
         if (is_inner_wall(*entity)) {
             const Lines lines = entity->as_polyline().lines();
@@ -40,19 +39,10 @@ void WipeInwardSupport::plan(const ExtrusionEntitiesPtr &perimeters)
 
 void WipeInwardSupport::append(const ExtrusionEntity &entity)
 {
-    const bool is_inner = is_inner_wall(entity);
     const Lines lines = entity.as_polyline().lines();
     printed_lines.insert(printed_lines.end(), lines.begin(), lines.end());
-    if (is_inner) {
+    if (is_inner_wall(entity))
         inner_lines.insert(inner_lines.end(), lines.begin(), lines.end());
-        // Entities are appended in the order plan() saw them.
-        printed_planned_inner = std::min(printed_planned_inner + lines.size(), planned_inner_lines.size());
-    }
-}
-
-Lines WipeInwardSupport::pending_inner_lines() const
-{
-    return Lines(planned_inner_lines.begin() + printed_planned_inner, planned_inner_lines.end());
 }
 
 // Orca: miter limit ratio. Matches DefaultMiterLimit from ClipperUtils.hpp.
