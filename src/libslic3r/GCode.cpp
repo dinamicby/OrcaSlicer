@@ -5241,7 +5241,9 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
         // external perimeters are eligible. Calibration overrides are applied during extrusion, after the region
         // context was created, so the effective setting is checked again here.
         if (EXTRUDER_CONFIG(wipe) && m_config.wipe_inward && m_config.wipe_inward_distance.value > 0. &&
-            wipe_support != nullptr && !wipe_support->inner_lines.empty() &&
+            wipe_support != nullptr &&
+            (!wipe_support->inner_lines.empty() ||
+             wipe_support->printed_planned_inner < wipe_support->planned_inner_lines.size()) &&
             // A loop's role is its first path's role. An overhanging start must
             // not hide ordinary external-wall segments elsewhere in the loop.
             std::any_of(paths.begin(), paths.end(),
@@ -5262,14 +5264,24 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
                 // untouched. Only walls printed before this loop support the wipe; inner walls determine the
                 // material side, and every earlier wall validates the executable path.
                 const double support_distance = scale_(std::max(nozzle_diameter, outer_wall_line_width));
-                Polyline inward_path = m_wipe.path;
-                if (offset_wipe_path_toward_support(
-                        inward_path, seam_start, seam_end, wipe_start,
-                        wipe_offset_direction(is_ccw, is_hole), offset_dist, max_wipe_length,
-                        wipe_support->inner_lines, wipe_support->printed_lines,
-                        m_wipe.path.lines(), support_distance)) {
-                    m_wipe.path = std::move(inward_path);
-                    wipe_inward_applied = true;
+                // Protype: Orca only takes the material side from inner walls printed before this loop. When the
+                // external wall comes first - Outer/Inner order, or a straight wall pack under "auto" - none is
+                // next to it, and the inner walls of this region printed right after it give the side instead.
+                // Support is still checked only against material already laid down: earlier walls and this loop.
+                const Lines pending_inner = wipe_support->pending_inner_lines();
+                for (const Lines *side_lines : {&wipe_support->inner_lines, &pending_inner}) {
+                    if (side_lines->empty())
+                        continue;
+                    Polyline inward_path = m_wipe.path;
+                    if (offset_wipe_path_toward_support(
+                            inward_path, seam_start, seam_end, wipe_start,
+                            wipe_offset_direction(is_ccw, is_hole), offset_dist, max_wipe_length,
+                            *side_lines, wipe_support->printed_lines,
+                            m_wipe.path.lines(), support_distance)) {
+                        m_wipe.path = std::move(inward_path);
+                        wipe_inward_applied = true;
+                        break;
+                    }
                 }
             }
         }
@@ -5384,8 +5396,10 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
             std::optional<WipeInwardSupport> wipe_support;
             if (m_wipe.enable && EXTRUDER_CONFIG(wipe) && m_config.wipe_inward &&
                 m_config.wipe_inward_distance.value > 0. &&
-                scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON)
+                scale_(EXTRUDER_CONFIG(wipe_distance)) > SCALED_EPSILON) {
                 wipe_support.emplace();
+                wipe_support->plan(region.perimeters);
+            }
             for (const ExtrusionEntity* ee : region.perimeters) {
                 gcode += this->extrude_entity(*ee, "perimeter", -1., region.perimeters,
                                              wipe_support ? &*wipe_support : nullptr);

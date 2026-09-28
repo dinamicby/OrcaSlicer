@@ -12,7 +12,7 @@
 
 namespace Slic3r {
 
-void WipeInwardSupport::append(const ExtrusionEntity &entity)
+static bool is_inner_wall(const ExtrusionEntity &entity)
 {
     const ExtrusionPaths *paths = nullptr;
     if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
@@ -22,13 +22,37 @@ void WipeInwardSupport::append(const ExtrusionEntity &entity)
 
     // A loop's role is its first path's role. An overhanging start must not
     // hide the ordinary inner-wall segments elsewhere in the same loop.
-    const bool is_inner = paths ? std::any_of(paths->begin(), paths->end(),
+    return paths ? std::any_of(paths->begin(), paths->end(),
         [](const ExtrusionPath &path) { return is_internal_perimeter(path.role()); }) :
         is_internal_perimeter(entity.role());
+}
+
+void WipeInwardSupport::plan(const ExtrusionEntitiesPtr &perimeters)
+{
+    planned_inner_lines.clear();
+    printed_planned_inner = 0;
+    for (const ExtrusionEntity *entity : perimeters)
+        if (is_inner_wall(*entity)) {
+            const Lines lines = entity->as_polyline().lines();
+            planned_inner_lines.insert(planned_inner_lines.end(), lines.begin(), lines.end());
+        }
+}
+
+void WipeInwardSupport::append(const ExtrusionEntity &entity)
+{
+    const bool is_inner = is_inner_wall(entity);
     const Lines lines = entity.as_polyline().lines();
     printed_lines.insert(printed_lines.end(), lines.begin(), lines.end());
-    if (is_inner)
+    if (is_inner) {
         inner_lines.insert(inner_lines.end(), lines.begin(), lines.end());
+        // Entities are appended in the order plan() saw them.
+        printed_planned_inner = std::min(printed_planned_inner + lines.size(), planned_inner_lines.size());
+    }
+}
+
+Lines WipeInwardSupport::pending_inner_lines() const
+{
+    return Lines(planned_inner_lines.begin() + printed_planned_inner, planned_inner_lines.end());
 }
 
 // Orca: miter limit ratio. Matches DefaultMiterLimit from ClipperUtils.hpp.
