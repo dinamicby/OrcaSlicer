@@ -5113,7 +5113,9 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
                 // its height on the way. The ramp then starts where the nozzle already is and needs no travel.
                 // A travel there went around the external wall and retracted, lifted and de-retracted again -
                 // right on the outer surface this move exists to keep clean.
-                ExtrusionPathSloped fake_path_wipe(Polyline{pt, ramp->first_point()}, paths.front(),
+                // The move takes the ramp's height and role, not the loop's first path's: when the clipped seam
+                // gap swallows that path, the ramp starts on the next one, e.g. an overhang of bridge height.
+                ExtrusionPathSloped fake_path_wipe(Polyline{pt, ramp->first_point()}, *ramp,
                                                    ExtrusionPathSloped::Slope{1., 0.},
                                                    ExtrusionPathSloped::Slope{ramp->slope_begin.z_ratio, 0.});
                 fake_path_wipe.set_force_no_extrusion(true);
@@ -5193,43 +5195,12 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
     const bool is_ccw = loop.is_counter_clockwise();
     std::optional<Point> wipe_on_loops_dest;
 
-    // make a little move inwards before leaving loop
-    if (m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter && m_layer != NULL && m_config.wall_loops.value > 1 && paths.front().size() >= 2 && paths.back().polyline.points.size() >= 3) {
-        // detect angle between last and first segment
-        // the side depends on the original winding order of the polygon (inwards for contours, outwards for holes)
-        //FIXME improve the algorithm in case the loop is tiny.
-        //FIXME improve the algorithm in case the loop is split into segments with a low number of points (see the Point b query).
-        Point a = paths.front().polyline.points[1];  // second point
-        Point b = *(paths.back().polyline.points.end()-3);       // second to last point
-        if (is_hole == loop.is_counter_clockwise()) {
-            // swap points
-            Point c = a; a = b; b = c;
-        }
-
-        double angle = paths.front().first_point().ccw_angle(a, b) / 3;
-
-        // turn inwards if contour, turn outwards if hole
-        if (is_hole == loop.is_counter_clockwise()) angle *= -1;
-
-        // create the destination point along the first segment and rotate it
-        // we make sure we don't exceed the segment length because we don't know
-        // the rotation of the second segment so we might cross the object boundary
-        Vec2d  p1 = paths.front().polyline.points.front().cast<double>();
-        Vec2d  p2 = paths.front().polyline.points[1].cast<double>();
-        Vec2d  v  = p2 - p1;
-        double nd = scale_(EXTRUDER_CONFIG(nozzle_diameter));
-        double l2 = v.squaredNorm();
-        // Shift by no more than a nozzle diameter.
-        //FIXME Hiding the seams will not work nicely for very densely discretized contours!
-        //BBS. shorten the travel distant before the wipe path
-        double threshold = 0.2;
-        Point  pt = (p1 + v * threshold).cast<coord_t>();
-        if (nd * nd < l2)
-            pt = (p1 + threshold * v * (nd / sqrt(l2))).cast<coord_t>();
-        //Point pt = ((nd * nd >= l2) ? (p1+v*0.4): (p1 + 0.2 * v * (nd / sqrt(l2)))).cast<coord_t>();
-        pt.rotate(angle, paths.front().polyline.points.front());
-        wipe_on_loops_dest = pt;
-    }
+    // Orca: the inward destination is sampled along the loop, so a tiny loop or a path of few points no longer
+    // needs the vertex-based special cases; degenerate geometry skips the move.
+    if (m_config.wipe_on_loops.value && paths.back().role() == erExternalPerimeter &&
+        m_layer != nullptr && m_config.wall_loops.value > 1 && paths.front().size() >= 2 &&
+        paths.back().polyline.points.size() >= 2)
+        wipe_on_loops_dest = wipe_on_loops_destination(paths, scale_(nozzle_diameter), is_ccw, is_hole);
 
     // BBS
     bool wipe_inward_applied = false;
@@ -5335,19 +5306,9 @@ std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string 
         m_multi_flow_segment_path_pa_set = true;
     }
 
-    // BBS
-    if (m_wipe.enable) {
-        m_wipe.path = Polyline();
-        for (ExtrusionPath &path : multipath.paths) {
-            //BBS: Don't need to save duplicated point into wipe path
-            if (!m_wipe.path.empty() && !path.empty() &&
-                m_wipe.path.last_point() == path.first_point())
-                m_wipe.path.append(path.polyline.points.begin() + 1, path.polyline.points.end());
-            else
-                m_wipe.path.append(path.polyline); // TODO: don't limit wipe to last path
-        }
-        m_wipe.path.reverse();
-    }
+    // Orca: multipath wipes retrace the extrusion in reverse order.
+    if (m_wipe.enable)
+        m_wipe.update_path(multipath.paths, true);
 
     return gcode;
 }
@@ -6265,11 +6226,19 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         double total_length = 0;
         if (sloped != nullptr) {
             // Calculate total extrusion length
-            Points p;
-            p.reserve(new_points.size());
-            std::transform(new_points.begin(), new_points.end(), std::back_inserter(p), [](const ProcessedPoint& pp) { return pp.p; });
-            Polyline l(p);
-            total_length = l.length() * SCALING_FACTOR;
+            // Protype: sum the rounded segment lengths the loop below adds up, skipping the same ones, so the last
+            // point written takes the slope's end exactly. The unrounded polyline length drifted from that sum; a
+            // missed end height left the next ramp segment a zero-length travel - a stray Z move and, without a
+            // minimum travel, a retraction.
+            Vec2d prev_point = this->point_to_gcode_quantized(new_points[0].p);
+            for (size_t i = 1; i < new_points.size(); i++) {
+                const Vec2d point = this->point_to_gcode_quantized(new_points[i].p);
+                const double line_length = (point - prev_point).norm();
+                if (line_length < EPSILON)
+                    continue;
+                total_length += line_length;
+                prev_point = point;
+            }
         }
         gcode += m_writer.set_speed(last_set_speed, "", comment);
         Vec2d prev = this->point_to_gcode_quantized(new_points[0].p);
@@ -6368,14 +6337,16 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                     tempDescription += Slic3r::format(" | Old Flow Value: %0.5f Length: %0.5f",oldE, line_length);
                 }
             }
+            // Protype: pass the no-extrusion flag like the constant-speed branch above. extrude_to_xyz() has no
+            // zero-dE guard, so a travel written as a sloped path got an E0 on every point.
             if (sloped == nullptr) {
                 // Normal extrusion
-                gcode += m_writer.extrude_to_xy(p, dE, GCodeWriter::full_gcode_comment ? tempDescription : "");
+                gcode += m_writer.extrude_to_xy(p, dE, GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion());
             } else {
                 // Sloped extrusion
                 const auto [z_ratio, e_ratio] = sloped->interpolate(path_length / total_length);
                 Vec3d dest3d(p(0), p(1), get_sloped_z(z_ratio));
-                gcode += m_writer.extrude_to_xyz(dest3d, dE * e_ratio, GCodeWriter::full_gcode_comment ? tempDescription : "");
+                gcode += m_writer.extrude_to_xyz(dest3d, dE * e_ratio, GCodeWriter::full_gcode_comment ? tempDescription : "", path.is_force_no_extrusion());
             }
 
             prev = p;
