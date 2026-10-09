@@ -17,6 +17,17 @@ orcaslicer_add_cmake_project(OCCT
     DEPENDS ${FREETYPE_PKG}
     CMAKE_ARGS
         -DBUILD_LIBRARY_TYPE=${library_build_type}
+        # Protype: the C++ standard is stated, not left to the compiler.
+        # OCCT 7.6 adds -std=c++0x itself only when CMAKE_CXX_COMPILER_ID is
+        # exactly "Clang". Under policy CMP0025 - always on in CMake 4, and
+        # on in older CMake once CMAKE_POLICY_VERSION_MINIMUM=3.5 is set, as
+        # the daemon's build script does - Apple's compiler reports
+        # "AppleClang", the flag is skipped and OCCT builds in the compiler's
+        # default mode. Apple clang 21 defaults to gnu++14 and gets away with
+        # it; AppleClang 15 (Xcode 15.4) defaults to gnu++98 and dies on
+        # `handle<BVH_Tree<T, N>>&` in BVH_Traverse.hxx. 14 is what the
+        # workstation build has been compiling OCCT with all along.
+        -DCMAKE_CXX_STANDARD=14
         -DUSE_TK=OFF
         -DUSE_TBB=OFF
 	#-DUSE_FREETYPE=OFF
