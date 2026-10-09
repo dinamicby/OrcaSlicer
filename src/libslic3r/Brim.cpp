@@ -1048,14 +1048,11 @@ static ExPolygons outer_inner_brim_area(const Print& print,
             if (support_material_extruder == extruderNo && brimToWrite.at(object->id()).sup) {
                 if (!object->support_layers().empty() && object->support_layers().front()->support_type==stInnerNormal) {
                     for (const Polygon& support_contour : object->support_layers().front()->support_fills.polygons_covered_by_spacing()) {
-                        // Brim will not be generated for supports
-                        /*
                         if (has_outer_brim) {
                             append(brim_area_support, diff_ex(offset_ex(support_contour, brim_width + brim_offset, jtRound, SCALED_RESOLUTION), offset_ex(support_contour, brim_offset)));
                         }
                         if (has_inner_brim || has_outer_brim)
                             append(no_brim_area_support, offset_ex(support_contour, 0));
-                        */
                         no_brim_area_support.emplace_back(support_contour);
                     }
                 }
@@ -1066,14 +1063,11 @@ static ExPolygons outer_inner_brim_area(const Print& print,
                         float brim_width_mod = ex_poly.area() / ex_poly.contour.length() < scaled_half_min_adh_length
                             && brim_width < scaled_flow_width ? brim_width + scaled_additional_brim_width : brim_width;
                         brim_width_mod = floor(brim_width_mod / scaled_flow_width / 2) * scaled_flow_width * 2;
-                        // Brim will not be generated for supports
-                        /*
                         if (has_outer_brim) {
                             append(brim_area_support, diff_ex(offset_ex(ex_poly.contour, brim_width_mod + brim_offset, jtRound, SCALED_RESOLUTION), offset_ex(ex_poly.contour, brim_offset)));
                         }
                         if (has_inner_brim)
                             append(brim_area_support, diff_ex(offset_ex(ex_poly.holes, -brim_offset), offset_ex(ex_poly.holes, -brim_width - brim_offset)));
-                        */
                         if (!has_outer_brim)
                             append(no_brim_area_support, diff_ex(offset(ex_poly.contour, no_brim_offset), ex_poly.holes));
                         if (!has_inner_brim && !has_outer_brim)
