@@ -1934,6 +1934,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     case CalibMode::Calib_PA_Pattern:
     case CalibMode::Calib_PA_Tower:
     case CalibMode::Calib_Retraction_tower:
+    case CalibMode::Calib_Retraction_steps:
         m_calib_config.set_key_value("wipe_inward", new ConfigOptionBool(false));
         break;
     default:
@@ -3944,6 +3945,24 @@ LayerResult GCode::process_layer(
             writer().config.apply(_cfg);
             sprintf(buf, "; Calib_Retraction_tower: Z_HEIGHT: %g, length:%g\n", print_z, _length);
             gcode += buf;
+            break;
+        }
+        case CalibMode::Calib_Retraction_steps: {
+            const Calib_Params &p = print.calib_params();
+            // The band of the layer's middle: a layer whose top lies on a band boundary is printed in the band below it.
+            const double mid    = print_z - 0.5 * m_last_height;
+            const int    band   = std::max(0, static_cast<int>(std::floor((mid - p.base_height) / p.band_height)));
+            const double length = std::max(0., p.start + band * p.step);
+            const double speed  = std::max(1., p.speed_start + band * p.speed_step);
+            DynamicConfig _cfg;
+            _cfg.set_key_value("retraction_length", new ConfigOptionFloats{length});
+            _cfg.set_key_value("retraction_speed", new ConfigOptionFloats{speed});
+            writer().config.apply(_cfg);
+            // Longer than `buf` holds.
+            char mark[128];
+            snprintf(mark, sizeof(mark), "; Calib_Retraction_steps: Z_HEIGHT: %g, band:%d, length:%g, speed:%g\n", print_z, band,
+                     length, speed);
+            gcode += mark;
             break;
         }
         case CalibMode::Calib_Input_shaping_freq: {

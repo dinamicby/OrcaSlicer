@@ -24,7 +24,9 @@ enum class CalibMode : int {
     Calib_Retraction_tower,
     Calib_Input_shaping_freq,
     Calib_Input_shaping_damp,
-    Calib_Junction_Deviation
+    Calib_Junction_Deviation,
+    // Protype: retraction length and speed stepped by print height, in bands of Calib_Params::band_height.
+    Calib_Retraction_steps
 };
 
 enum class CalibState { Start = 0, Preset, Calibration, CoarseSave, FineCalibration, Save, Finish };
@@ -39,6 +41,14 @@ struct Calib_Params
     int test_model;
     std::vector<double> accelerations;
     std::vector<double> speeds;
+
+    // Calib_Retraction_steps: band i covers print heights from base_height + i * band_height;
+    // its retraction length is start + i * step (mm) and its retraction speed
+    // speed_start + i * speed_step (mm/s). A zero step holds that value through the test.
+    double band_height = 1.;
+    double base_height = 0.;
+    double speed_start = 0.;
+    double speed_step  = 0.;
 
     CalibMode mode;
 };
