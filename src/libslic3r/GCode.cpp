@@ -6827,8 +6827,18 @@ std::string GCode::set_extruder(unsigned int extruder_id, double print_z, bool b
     if (!m_writer.need_toolchange(extruder_id))
         return "";
 
+    // Protype: on a single nozzle a start G-code that ended with T<n> has loaded that filament,
+    // so selecting it for the first time exchanges nothing. Without this, change_filament_gcode
+    // ran on the tool itself (cut, unload, reload) before the first layer of every job past
+    // tool 0: GCodeWriter::set_extruders counts those as multiple extruders even when one prints.
+    const bool loaded_by_start_gcode = m_config.single_extruder_multi_material && m_writer.extruder() == nullptr &&
+                                       m_start_gcode_filament == int(extruder_id);
+    // It stays the first selection for the macros: `toolchange_count > 1` means "not the first".
+    if (loaded_by_start_gcode)
+        m_toolchange_count++;
+
     // if we are running a single-extruder setup, just set the extruder and return nothing
-    if (!m_writer.multiple_extruders) {
+    if (!m_writer.multiple_extruders || loaded_by_start_gcode) {
         this->placeholder_parser().set("current_extruder", extruder_id);
 
         std::string gcode;
