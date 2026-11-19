@@ -191,6 +191,20 @@ static ExPolygons polyhole_removed_solid(const ExPolygon &island, const Polygon 
     return removed.empty() ? removed : intersection_ex(removed, island);
 }
 
+// A region hole survives the layer union only if its rim is exposed all the way around.
+// Probe the rim at Clipper's merge tolerance: another region may fill only a sector or
+// a concentric ring and leave the centre empty. A detached island inside a bore is fine.
+static bool hole_touches_other_region(const Layer &layer, size_t region_idx, const Polygon &hole)
+{
+    if (layer.regions().size() == 1)
+        return false;
+    const Polygons rim = contour_to_polygons(hole, 2.f * ClipperSafetyOffset);
+    for (const LayerRegion *other : layer.regions())
+        if (other != layer.regions()[region_idx] && !other->slices.empty() && !intersection(other->slices.surfaces, rim).empty())
+            return true;
+    return false;
+}
+
 // Detect and convert holes to polyholes, implementation is ported from SuperSlicer
 void PrintObject::_transform_hole_to_polyholes()
 {
@@ -239,6 +253,8 @@ void PrintObject::_transform_hole_to_polyholes()
                                 coord_t max_variation = std::max(SCALED_EPSILON, scale_(this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_threshold.get_abs_value(unscaled(diameter_sum / hole.points.size()))));
                                 bool twist = this->m_layers[layer_idx]->m_regions[region_idx]->region().config().hole_to_polyhole_twisted.value;
                                 if (diameter_max - diameter_min < max_variation * 2 && diameter_line_max - diameter_line_min < max_variation * 2) {
+                                    if (hole_touches_other_region(*layer, region_idx, hole))
+                                        continue;
                                     layerid2center[layer_idx].emplace_back(
                                         std::tuple<Point, float, int, coord_t, bool>{center, diameter_max, layer->m_regions[region_idx]->region().config().wall_filament.value, max_variation, twist}, & hole);
                                 }
