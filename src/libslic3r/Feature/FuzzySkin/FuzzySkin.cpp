@@ -214,7 +214,8 @@ bool should_fuzzify(const FuzzySkinConfig& config, const int layer_id, const siz
 {
     const auto fuzziy_type = config.type;
 
-    if (fuzziy_type == FuzzySkinType::None) {
+    // Older profiles may supply zero, or a distance below one scaled coordinate.
+    if (fuzziy_type == FuzzySkinType::None || config.point_distance <= 0) {
         return false;
     }
     if (!config.fuzzy_first_layer && layer_id <= 0) {

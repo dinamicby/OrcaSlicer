@@ -2215,15 +2215,18 @@ std::vector<std::vector<ExPolygons>> fuzzy_skin_segmentation_by_painting(const P
         return {mv.fuzzy_skin_facets, mv.is_fuzzy_skin_painted(), false};
     };
 
-    // Because we apply fuzzy skin just on external perimeters, we limit the depth of fuzzy skin
-    // by the maximal extrusion width of external perimeters.
-    float max_external_perimeter_width = 0.;
+    // A blocker on an AllWalls region has to reach the innermost perimeter.
+    float max_width = 0.f;
+    const auto layer_height = print_object.config().layer_height;
     for (size_t region_idx = 0; region_idx < print_object.num_printing_regions(); ++region_idx) {
         const PrintRegion &region = print_object.printing_region(region_idx);
-        max_external_perimeter_width = std::max<float>(max_external_perimeter_width, region.flow(print_object, frExternalPerimeter, print_object.config().layer_height).width());
+        float width = region.flow(print_object, frExternalPerimeter, layer_height).width();
+        if (region.config().fuzzy_skin == FuzzySkinType::AllWalls && region.config().wall_loops > 1)
+            width += (region.config().wall_loops.value - 1) * region.flow(print_object, frPerimeter, layer_height).width();
+        max_width = std::max(max_width, width);
     }
 
-    return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_external_perimeter_width, 0.f, false, IncludeTopAndBottomLayers::No, throw_on_cancel_callback);
+    return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, 0.f, false, IncludeTopAndBottomLayers::No, throw_on_cancel_callback);
 }
 
 } // namespace Slic3r
