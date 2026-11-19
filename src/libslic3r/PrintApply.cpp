@@ -809,7 +809,7 @@ bool verify_update_print_object_regions(
         for (const PrintObjectRegions::FuzzySkinPaintedRegion &region : layer_range.fuzzy_skin_painted_regions) {
             const PrintRegion &parent_print_region = *region.parent_print_object_region(layer_range);
             PrintRegionConfig  cfg                 = parent_print_region.config();
-            cfg.fuzzy_skin.value                   = FuzzySkinType::All;
+            cfg.fuzzy_skin.value                   = region.fuzzy ? FuzzySkinType::All : FuzzySkinType::None;
             if (cfg != region.region->config()) {
                 // Region configuration changed.
                 if (print_region_ref_cnt(*region.region) == 0) {
@@ -1048,25 +1048,29 @@ static PrintObjectRegions* generate_print_object_regions(
         for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges_regions) {
             // FuzzySkinPaintedRegion can override different parts of the Layer than PaintedRegions,
             // so FuzzySkinPaintedRegion has to point to both VolumeRegion and PaintedRegion.
+            auto add_fuzzy_regions = [&](FuzzySkinParentType type, int parent_id, const PrintRegion &parent) {
+                for (bool fuzzy : {false, true}) {
+                    PrintRegionConfig cfg = parent.config();
+                    cfg.fuzzy_skin.value = fuzzy ? FuzzySkinType::All : FuzzySkinType::None;
+                    layer_range.fuzzy_skin_painted_regions.push_back({type, parent_id, get_create_region(std::move(cfg)), fuzzy});
+                }
+            };
             for (int parent_volume_region_id = 0; parent_volume_region_id < int(layer_range.volume_regions.size()); ++parent_volume_region_id) {
                 if (const PrintObjectRegions::VolumeRegion &parent_volume_region = layer_range.volume_regions[parent_volume_region_id]; parent_volume_region.model_volume->is_model_part() || parent_volume_region.model_volume->is_modifier()) {
-                    PrintRegionConfig cfg = parent_volume_region.region->config();
-                    cfg.fuzzy_skin.value  = FuzzySkinType::All;
-                    layer_range.fuzzy_skin_painted_regions.push_back({FuzzySkinParentType::VolumeRegion, parent_volume_region_id, get_create_region(std::move(cfg))});
+                    add_fuzzy_regions(FuzzySkinParentType::VolumeRegion, parent_volume_region_id, *parent_volume_region.region);
                 }
             }
 
             for (int parent_painted_regions_id = 0; parent_painted_regions_id < int(layer_range.painted_regions.size()); ++parent_painted_regions_id) {
                 const PrintObjectRegions::PaintedRegion &parent_painted_region = layer_range.painted_regions[parent_painted_regions_id];
 
-                PrintRegionConfig cfg = parent_painted_region.region->config();
-                cfg.fuzzy_skin.value  = FuzzySkinType::All;
-                layer_range.fuzzy_skin_painted_regions.push_back({FuzzySkinParentType::PaintedRegion, parent_painted_regions_id, get_create_region(std::move(cfg))});
+                add_fuzzy_regions(FuzzySkinParentType::PaintedRegion, parent_painted_regions_id, *parent_painted_region.region);
             }
 
             // Sort the regions by parent region::print_object_region_id() to help the slicing algorithm when applying fuzzy skin segmentation.
             std::sort(layer_range.fuzzy_skin_painted_regions.begin(), layer_range.fuzzy_skin_painted_regions.end(), [&layer_range](auto &l, auto &r) {
-                return l.parent_print_object_region_id(layer_range) < r.parent_print_object_region_id(layer_range);
+                return std::make_pair(l.parent_print_object_region_id(layer_range), l.fuzzy) <
+                       std::make_pair(r.parent_print_object_region_id(layer_range), r.fuzzy);
             });
         }
     }

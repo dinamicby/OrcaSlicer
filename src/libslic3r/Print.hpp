@@ -262,6 +262,8 @@ public:
         // Pointer to PrintObjectRegions::all_regions.
         PrintRegion *region { nullptr };
 
+        bool         fuzzy { true };
+
         PrintRegion *parent_print_object_region(const LayerRangeRegions &layer_range) const;
         int          parent_print_object_region_id(const LayerRangeRegions &layer_range) const;
     };

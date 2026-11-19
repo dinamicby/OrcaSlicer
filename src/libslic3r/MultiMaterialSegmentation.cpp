@@ -2209,7 +2209,7 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo
 std::vector<std::vector<ExPolygons>> fuzzy_skin_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback) {
-    const size_t num_facets_states = 2; // Unpainted facets and facets painted with fuzzy skin.
+    const size_t num_facets_states = 3; // Unpainted, fuzzy (ENFORCER), smooth (BLOCKER).
 
     const auto extract_facets_info = [](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
         return {mv.fuzzy_skin_facets, mv.is_fuzzy_skin_painted(), false};

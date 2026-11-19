@@ -1025,74 +1025,59 @@ void apply_fuzzy_skin_segmentation(PrintObject &print_object, ThrowOnCancel thro
             it_layer_range = layer_range_next(layer_ranges, it_layer_range, layer.slice_z);
             const PrintObjectRegions::LayerRangeRegions &layer_range = *it_layer_range;
 
-            assert(segmentation[layer_idx].size() == 1);
-            const ExPolygons &fuzzy_skin_segmentation      = segmentation[layer_idx][0];
-            const BoundingBox fuzzy_skin_segmentation_bbox = get_extents(fuzzy_skin_segmentation);
-            if (fuzzy_skin_segmentation.empty())
+            const auto &masks = segmentation[layer_idx]; // ENFORCER, BLOCKER
+            assert(masks.size() == 2);
+            if (masks[0].empty() && masks[1].empty())
                 continue;
+            const BoundingBox bounds[] = {get_extents(masks[0]), get_extents(masks[1])};
 
-            // Split LayerRegions by painted fuzzy skin regions.
-            // layer_range.fuzzy_skin_painted_regions are sorted by parent PrintObject region ID.
             std::vector<ByRegion> by_region(layer.region_count());
-            auto                  it_fuzzy_skin_region_begin = layer_range.fuzzy_skin_painted_regions.cbegin();
-            for (int parent_layer_region_idx = 0; parent_layer_region_idx < layer.region_count(); ++parent_layer_region_idx) {
-                if (it_fuzzy_skin_region_begin == layer_range.fuzzy_skin_painted_regions.cend())
+            auto collect = [&](int id, ExPolygons polygons) {
+                if (polygons.empty())
+                    return;
+                ByRegion &dst = by_region[id];
+                if (dst.expolygons.empty())
+                    dst.expolygons = std::move(polygons);
+                else {
+                    append(dst.expolygons, std::move(polygons));
+                    dst.needs_merge = true;
+                }
+            };
+
+            auto it = layer_range.fuzzy_skin_painted_regions.cbegin();
+            const auto end = layer_range.fuzzy_skin_painted_regions.cend();
+            for (int id = 0; id < layer.region_count(); ++id) {
+                const auto &surfaces = layer.get_region(id)->slices.surfaces;
+                if (surfaces.empty())
                     continue;
-
-                const LayerRegion &parent_layer_region = *layer.get_region(parent_layer_region_idx);
-                const PrintRegion &parent_print_region = parent_layer_region.region();
-                assert(parent_print_region.print_object_region_id() == parent_layer_region_idx);
-                if (parent_layer_region.slices.empty())
-                    continue;
-
-                // Find the first FuzzySkinPaintedRegion, which overrides the parent PrintRegion.
-                auto it_fuzzy_skin_region = std::find_if(it_fuzzy_skin_region_begin, layer_range.fuzzy_skin_painted_regions.cend(), [&layer_range, &parent_print_region](const auto &fuzzy_skin_region) {
-                    return fuzzy_skin_region.parent_print_object_region_id(layer_range) == parent_print_region.print_object_region_id();
-                });
-
-                if (it_fuzzy_skin_region == layer_range.fuzzy_skin_painted_regions.cend())
-                    continue; // This LayerRegion isn't overrides by any FuzzySkinPaintedRegion.
-
-                assert(it_fuzzy_skin_region->parent_print_object_region(layer_range) == &parent_print_region);
-
-                // Update the beginning FuzzySkinPaintedRegion iterator for the next iteration.
-                it_fuzzy_skin_region_begin = std::next(it_fuzzy_skin_region);
-
-                const BoundingBox parent_layer_region_bbox        = get_extents(parent_layer_region.slices.surfaces);
-                Polygons          layer_region_remaining_polygons = to_polygons(parent_layer_region.slices.surfaces);
-                // Don't trim by self, it is not reliable.
-                if (parent_layer_region_bbox.overlap(fuzzy_skin_segmentation_bbox) && it_fuzzy_skin_region->region != &parent_print_region) {
-                    // Steal from this region.
-                    const int  target_region_id = it_fuzzy_skin_region->region->print_object_region_id();
-                    ExPolygons stolen           = intersection_ex(parent_layer_region.slices.surfaces, fuzzy_skin_segmentation);
+                const BoundingBox bbox = get_extents(surfaces);
+                Polygons remaining = to_polygons(surfaces);
+                while (it != end && it->parent_print_object_region_id(layer_range) < id)
+                    ++it;
+                bool split = false;
+                // Consume the blocker first, then the enforcer from the remainder.
+                while (it != end && it->parent_print_object_region_id(layer_range) == id) {
+                    const auto &region = *it++;
+                    const size_t state = region.fuzzy ? 0 : 1;
+                    const int target = region.region->print_object_region_id();
+                    if (target == id || remaining.empty() || masks[state].empty() || !bbox.overlap(bounds[state]))
+                        continue;
+                    ExPolygons stolen = intersection_ex(remaining, masks[state]);
+                    // When the parent is already smooth its blocker was a no-op.
+                    // Keep that part in the parent even at a shared paint boundary.
+                    if (region.fuzzy && !masks[1].empty() && bbox.overlap(bounds[1]))
+                        stolen = diff_ex(stolen, masks[1]);
                     if (!stolen.empty()) {
-                        ByRegion &dst = by_region[target_region_id];
-                        if (dst.expolygons.empty()) {
-                            dst.expolygons = std::move(stolen);
-                        } else {
-                            append(dst.expolygons, std::move(stolen));
-                            dst.needs_merge = true;
-                        }
-                    }
-
-                    // Trim slices of this LayerRegion by the fuzzy skin region.
-                    layer_region_remaining_polygons = diff(layer_region_remaining_polygons, fuzzy_skin_segmentation);
-
-                    // Filter out unprintable polygons. Detailed explanation is inside apply_mm_segmentation.
-                    if (!layer_region_remaining_polygons.empty()) {
-                        layer_region_remaining_polygons = opening(union_ex(layer_region_remaining_polygons), scaled<float>(5. * EPSILON), scaled<float>(5. * EPSILON));
+                        remaining = diff(remaining, stolen);
+                        collect(target, std::move(stolen));
+                        split = true;
                     }
                 }
-
-                if (!layer_region_remaining_polygons.empty()) {
-                    ByRegion &dst = by_region[parent_print_region.print_object_region_id()];
-                    if (dst.expolygons.empty()) {
-                        dst.expolygons = union_ex(layer_region_remaining_polygons);
-                    } else {
-                        append(dst.expolygons, union_ex(layer_region_remaining_polygons));
-                        dst.needs_merge = true;
-                    }
+                if (split && !remaining.empty()) {
+                    // Filter unprintable slivers as in apply_mm_segmentation.
+                    remaining = opening(union_ex(remaining), scaled<float>(5. * EPSILON), scaled<float>(5. * EPSILON));
                 }
+                collect(id, union_ex(remaining));
             }
 
             // Re-create Surfaces of LayerRegions.
